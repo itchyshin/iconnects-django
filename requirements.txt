@@ -11,7 +11,7 @@ celery==5.6.3
 gunicorn==23.0.0
 whitenoise==6.8.2
 python-dotenv==1.2.2
-markdown==3.7
+markdown==3.10.2
 jsonschema==4.23.0
 resend==2.29.0
 django-ses==4.7.2
