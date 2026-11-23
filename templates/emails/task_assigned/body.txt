@@ -1,0 +1,11 @@
+{% extends "emails/base_email.txt" %}
+{% load task_tags %}
+{% block content %}{% autoescape off %}Hi {{ user.name|default:user.email }},
+
+{% if assigned_by %}{{ assigned_by.name|default:assigned_by.email }} assigned you{% else %}You were assigned{% endif %} {% if entries|length == 1 %}a task{% else %}{{ entries|length }} tasks{% endif %} on i-connects:
+
+{% for entry in entries %}- {{ entry.task.name }} ({{ entry.task.project.name }}){% if entry.task.deadline %} -- due {{ entry.task.deadline|in_zone:entry.task.timezone|date:"M j, Y g:i A T" }}{% endif %}
+  {{ entry.url }}
+{% endfor %}
+Open {% if entries|length == 1 %}the task{% else %}a task{% endif %} in i-connects to see the details.
+{% endautoescape %}{% endblock %}

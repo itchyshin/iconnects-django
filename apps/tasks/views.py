@@ -20,6 +20,7 @@ from django.http import (
     HttpResponse,
     HttpResponseBadRequest,
     HttpResponseForbidden,
+    JsonResponse,
 )
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import resolve, reverse, Resolver404
@@ -40,7 +41,13 @@ from django.views.generic import (
 
 from apps.audit.services import AuditAction, log_action
 from apps.comments.forms import CommentForm
-from apps.core.enums import CompletedAs, TaskStatus
+from apps.comments.views import comment_box_context
+from apps.core.enums import (
+    CompletedAs,
+    ContributionType,
+    TaskStatus,
+    credit_role_choices,
+)
 from apps.projects.models import Project, ProjectMember
 from apps.tasks.calendar import (
     VIEWS as CALENDAR_VIEWS,
@@ -52,6 +59,7 @@ from apps.tasks.calendar import (
     shift_date,
 )
 from apps.tasks.forms import (
+    AssigneeDatesForm,
     KanbanBoardForm,
     MilestoneForm,
     TaskAssignForm,
@@ -59,6 +67,13 @@ from apps.tasks.forms import (
     TaskMilestoneForm,
 )
 from apps.tasks.ics import build_ics
+from apps.tasks.timezones import (
+    DEFAULT_DUE_TIME,
+    DEFAULT_START_TIME,
+    canonical,
+    picker_value,
+    short_zone_label,
+)
 from apps.tasks.import_csv import import_rows, parse_csv
 from apps.tasks.import_form import TaskImportForm
 from apps.tasks.mixins import (
@@ -68,14 +83,29 @@ from apps.tasks.mixins import (
 )
 from apps.tasks.models import ActivityEvent, KanbanBoard, Milestone, Task, TaskActivity, TaskLog
 from apps.tasks.services import (
+    UNSET,
+    apply_task_date_change,
+    rezone_following_members,
     approve_completion,
+    clear_member_dates,
     clear_review,
     close_task,
     mark_own_done,
     mark_reviewed,
     move_task,
+    notify_new_assignees,
+    pending_members,
     reopen_own,
     reopen_task,
+    review_closed,
+    review_locked,
+    set_member_contribution_type,
+    set_member_dates,
+    set_pending_dates,
+    unverify_part,
+    verify_part,
+    verify_parts,
+    VerifyScope,
 )
 
 
@@ -111,8 +141,10 @@ class MyTaskListView(LoginRequiredMixin, ListView):
     _SORT_MAP = {
         "newest": "-created_at",
         "oldest": "created_at",
-        "deadline_asc": "deadline",
-        "deadline_desc": "-deadline",
+        # The user's own deadline: their individual one where a Lead set
+        # it, else the task's (``TaskQuerySet.with_my_deadline``).
+        "deadline_asc": "my_deadline",
+        "deadline_desc": "-my_deadline",
         "name_asc": "name",
         "name_desc": "-name",
     }
@@ -138,7 +170,7 @@ class MyTaskListView(LoginRequiredMixin, ListView):
         )
         return Task.objects.filter(
             Q(assigned_members__users=user) | Q(reviewers__users=user)
-        ).annotate(
+        ).with_my_deadline(user).annotate(
             user_log_status=latest_log_status,
             is_assigned=Exists(user_member_qs.filter(assigned_tasks=OuterRef("pk"))),
             is_reviewing=Exists(user_member_qs.filter(reviewed_tasks=OuterRef("pk"))),
@@ -207,7 +239,7 @@ class MyTaskListView(LoginRequiredMixin, ListView):
 
         sort = self.request.GET.get("sort", "newest")
         if sort in ("deadline_asc", "deadline_desc"):
-            qs = qs.filter(deadline__isnull=False)
+            qs = qs.filter(my_deadline__isnull=False)
         order = self._SORT_MAP.get(sort, "-created_at")
         return qs.order_by(order, "id")
 
@@ -294,6 +326,7 @@ def _fmt_short(d) -> str:
 BOARD_FILTERS = (
     ("", "All"),
     ("overdue", "Overdue"),
+    ("extended", "Extended"),
     ("high_priority", "High Priority"),
     ("completed", "Completed"),
     ("not_completed", "Not Completed"),
@@ -313,12 +346,14 @@ def _board_filter(request) -> str:
 
 
 def _apply_board_filter(tasks, value: str):
-    """Narrow ``tasks`` to the board filter ``value``. Overdue is
-    ``Task.is_overdue`` as a query: still open past its deadline."""
+    """Narrow ``tasks`` to the board filter ``value``. Overdue and Extended
+    are ``Task.is_overdue`` / ``Task.is_extended`` as queries: still open
+    past the task deadline, and Extended when every assignee not yet done
+    has an individual deadline still to come."""
     if value == "overdue":
-        return tasks.filter(deadline__lt=timezone.now()).exclude(
-            status=TaskStatus.COMPLETED
-        )
+        return tasks.overdue()
+    if value == "extended":
+        return tasks.extended()
     if value == "high_priority":
         return tasks.filter(is_priority=True)
     if value == "completed":
@@ -332,7 +367,7 @@ def _kanban_columns(request, project):
     """The board's columns, each with its tasks prefetched (narrowed by the
     board filter, so a column's count matches its cards)."""
     tasks = _apply_board_filter(
-        Task.objects.prefetch_related("assigned_members", "reviewers"),
+        Task.objects.prefetch_related("assigned_members", "reviewers", "assignee_deadlines", "task_logs"),
         _board_filter(request),
     )
     return (
@@ -350,7 +385,7 @@ def _calendar_context(request, project) -> dict:
     tasks = (
         Task.objects.filter(project=project)
         .filter(Q(deadline__isnull=False) | Q(start_date__isnull=False))
-        .prefetch_related("assigned_members", "reviewers")
+        .prefetch_related("assigned_members", "reviewers", "assignee_deadlines", "task_logs")
     )
     tasks = _apply_board_filter(tasks, _board_filter(request))
 
@@ -470,7 +505,9 @@ def _list_view_context(request, project, columns) -> dict:
         assignee = ""
 
     tasks = Task.objects.filter(project=project).prefetch_related(
-        "assigned_members", "reviewers"
+        # The last two let a past-due task tell Overdue from Extended
+        # (``Task.is_overdue``) without a query of its own.
+        "assigned_members", "reviewers", "assignee_deadlines", "task_logs"
     )
 
     if q:
@@ -580,7 +617,7 @@ def _table_view_context(request, project) -> dict:
     tasks = (
         Task.objects.filter(project=project)
         .select_related("container")
-        .prefetch_related("assigned_members", "reviewers")
+        .prefetch_related("assigned_members", "reviewers", "assignee_deadlines", "task_logs")
         .annotate(
             n_assignees=Count("assigned_members", distinct=True),
             n_reviewers=Count("reviewers", distinct=True),
@@ -696,8 +733,7 @@ def _completion_locked(task) -> bool:
     that be rewritten in place would rewrite the record behind the credit.
 
     A lock rather than a wall: completion is reversible, and Mark Not Complete
-    is the action a completed task still offers its Lead. Reversing it also
-    withdraws the credit, so the two move together.
+    is the action a completed task still offers its Lead.
 
     Board position is deliberately left out. Which column a task sits in is
     where it is, not what it is, and dragging a finished task into Done is the
@@ -763,16 +799,15 @@ class TaskCreateView(
         # A date range picked on the calendar view (?start_date=&deadline=,
         # both YYYY-MM-DD) pre-fills the new task's span; the user still
         # fills in the rest and saves — nothing is created automatically.
+        # Clock times with no zone attached: they are read in whichever zone
+        # the Lead saves the task in (their system timezone by default). The
+        # times are the form's defaults: 9:00 AM to start, 5:00 PM to be due.
         start_date_param = parse_date(self.request.GET.get("start_date") or "")
         if start_date_param:
-            initial["start_date"] = timezone.make_aware(
-                datetime.combine(start_date_param, time.min)
-            )
+            initial["start_date"] = datetime.combine(start_date_param, DEFAULT_START_TIME)
         deadline_param = parse_date(self.request.GET.get("deadline") or "")
         if deadline_param:
-            initial["deadline"] = timezone.make_aware(
-                datetime.combine(deadline_param, time(23, 59))
-            )
+            initial["deadline"] = datetime.combine(deadline_param, DEFAULT_DUE_TIME)
         return initial
 
     def form_valid(self, form):
@@ -791,6 +826,9 @@ class TaskCreateView(
         form.save_m2m()
         # Seed a TaskLog per assignee (mirrors the Blitz createTask behaviour).
         _seed_assignee_logs(task)
+        notify_new_assignees(
+            [(task, _assignee_ids(task))], assigned_by=self.request.user
+        )
         log_action(
             AuditAction.TASK_CREATED,
             actor=self.request.user,
@@ -866,14 +904,18 @@ class TaskDetailPaneView(LoginRequiredMixin, ProjectContextMixin, TemplateView):
                 "assigned_members",
                 "reviewers",
                 "task_logs__reviewed_by",
+                "assignee_deadlines",
+                "assignee_contribution_types",
                 "task_logs__completed_by",
                 "comments__author",
+                "comments__mentions__user",
             ),
             project=self.project,
             pk=kwargs["pk"],
         )
         context["task"] = task
         context["comment_form"] = CommentForm()
+        context.update(comment_box_context(task, self.request.user))
         context["status_block"] = _task_status_context(
             task,
             project_member=self.project_member,
@@ -902,13 +944,14 @@ class TaskDetailView(LoginRequiredMixin, ProjectContextMixin, TemplateView):
         context = super().get_context_data(**kwargs)
         task = get_object_or_404(
             Task.objects.select_related("container", "milestone", "created_by")
-            .prefetch_related("assigned_members", "reviewers", "task_logs__comments__author", "task_logs__reviewed_by", "task_logs__completed_by", "comments__author", "activities__actor", "activities__member")
+            .prefetch_related("assigned_members", "reviewers", "task_logs__comments__author", "task_logs__reviewed_by", "assignee_deadlines", "assignee_contribution_types", "task_logs__completed_by", "comments__author", "comments__mentions__user", "activities__actor", "activities__member")
             .filter(project=self.project),
             pk=kwargs["pk"],
         )
         context["task"] = task
         context["task_activities"] = task.activities.select_related("actor", "member")
         context["comment_form"] = CommentForm()
+        context.update(comment_box_context(task, self.request.user))
         context["assign_form"] = TaskAssignForm(
             project=self.project,
             initial={"assigned_members": task.assigned_members.all()},
@@ -974,7 +1017,11 @@ class TaskUpdateView(
     UpdateView,
 ):
     """Edit a task. Refused while the task stands completed — see
-    :class:`CompletedTaskLockMixin`."""
+    :class:`CompletedTaskLockMixin`.
+
+    Credit can be written while a task is open (a Lead verifies parts as they
+    come in), so a change of contribution type is carried onto that credit.
+    """
 
     template_name = "tasks/task_form.html"
     form_class = TaskForm
@@ -994,16 +1041,56 @@ class TaskUpdateView(
         return kwargs
 
     def form_valid(self, form):
+        old_type = form.initial.get("contribution_type")
+        # Read before saving: only members this edit adds hear about it.
+        previous_ids = _assignee_ids(self.object)
         task = form.save()
+        actor = self.project_member or _fallback_member(self.request.user, self.project)
+        # A new timezone: members whose own dates follow the task's zone keep
+        # their clock times in it, as the task's dates do.
+        if form.zone_changed():
+            rezone_following_members(
+                task=task,
+                old_zone=form.original_zone_name,
+                new_zone=task.timezone,
+                actor=actor,
+            )
+        # A moved start or due date asks what happens to members' own dates
+        # of that kind (TaskForm.individual_*): shift, keep or remove them.
+        for date_field, choice in form.changed_individual_dates():
+            apply_task_date_change(
+                task=task,
+                field=date_field,
+                old_value=form.original_dates[date_field],
+                new_value=getattr(task, date_field),
+                choice=choice,
+                actor=actor,
+                old_zone=form.original_zone_name,
+            )
+        if "contribution_type" in form.changed_data and old_type:
+            from apps.contributions.services import sync_contribution_type
+
+            sync_contribution_type(task, old_type=old_type)
         # Seed Activity & comments entries for any newly-assigned members,
         # mirroring the Assignees ("Change assignees") flow.
         _seed_assignee_logs(task)
+        notify_new_assignees(
+            [(task, _assignee_ids(task) - previous_ids)],
+            assigned_by=self.request.user,
+        )
         log_action(
             AuditAction.TASK_UPDATED,
             actor=self.request.user,
             entity=task,
             project=task.project,
-            metadata={"name": task.name},
+            metadata={
+                "name": task.name,
+                **(
+                    {"timezone": task.timezone, "previous_timezone": form.original_zone_name}
+                    if form.zone_changed()
+                    else {}
+                ),
+            },
         )
         if self.request.headers.get("HX-Request"):
             response = render(
@@ -1048,6 +1135,31 @@ class TaskUpdateView(
         return context
 
 
+class TimezoneListView(LoginRequiredMixin, View):
+    """The timezone picker's entries, as JSON: every zone with its city,
+    country, offset right now and the words it is searched by, plus the old
+    zone names browsers may report (``timezones.timezone_choices``,
+    ``timezones.ALIASES``). Fetched once per page by the picker
+    (``_components/timezone_select.html``) rather than written into every
+    form, and cached for an hour since the offsets move only with daylight
+    saving."""
+
+    def get(self, request, *args, **kwargs):
+        from apps.tasks.timezones import ALIASES, timezone_choices
+
+        fields = ("value", "label", "offset", "display", "detail", "search")
+        response = JsonResponse(
+            {
+                "options": [
+                    {key: option[key] for key in fields} for option in timezone_choices()
+                ],
+                "aliases": ALIASES,
+            }
+        )
+        response["Cache-Control"] = "private, max-age=3600"
+        return response
+
+
 class TaskImportView(
     LoginRequiredMixin, ProjectManagerRequiredMixin, ProjectContextMixin, FormView
 ):
@@ -1067,7 +1179,8 @@ class TaskImportView(
             return self.form_invalid(form)
 
         created, row_errors = import_rows(
-            self.project, rows, user=self.request.user
+            self.project, rows, user=self.request.user,
+            timezone=form.cleaned_data.get("timezone") or None,
         )
 
         if created == 0 and row_errors and row_errors[0].startswith("import failed"):
@@ -1216,18 +1329,35 @@ class TaskChangeColumnView(
 
 _LOCKED_MESSAGE = (
     "This task is marked completed. A Lead has to mark it not complete before "
-    "its marks and reviews can change."
+    "setting or clearing another member's done mark."
+)
+
+_REVIEW_CLOSED_MESSAGE = (
+    "This part was marked done before the task was marked completed, so it "
+    "can no longer be reviewed. A Lead has to mark the task not complete "
+    "first."
+)
+
+_REVIEW_LOCKED_MESSAGE = (
+    "This part was reviewed before the task was marked completed, so its "
+    "review is locked. A Lead has to mark the task not complete before it "
+    "can be withdrawn."
 )
 
 def _marks_locked(task) -> bool:
-    """True once the task is marked completed, freezing every per-member
-    action.
+    """True once the task is marked completed, freezing the marks a Lead sets
+    for others.
 
-    Marking done, undoing a mark, reviewing and withdrawing a review all stop
-    there — for assignees, reviewers and Leads alike, and however the task
-    came to be completed: by a Lead's click, or by its last review closing it.
-    A Lead who needs to change one marks the task Not Complete first, which
-    is the only action a completed task still offers.
+    Each assignee's own mark (``TaskCompleteView``, ``TaskUndoOwnView``), the
+    reviewers' reviews (``TaskLogReviewView``) and the Lead's verifications
+    (``TaskLogVerifyView``) stay open on a completed task: closing it is the
+    Lead's call about the task, not a verdict on any one part. The exceptions
+    are a review given before the task was completed, which nobody can
+    withdraw (``services.review_locked``) — though the assignee undoing their
+    own mark still clears it — and a part marked before the task was
+    completed and left unreviewed, which can no longer be reviewed
+    (``services.review_closed``); only parts marked after completion are. A Lead who needs to change either marks the
+    task Not Complete first.
     """
     return task.status == TaskStatus.COMPLETED
 
@@ -1235,9 +1365,10 @@ def _marks_locked(task) -> bool:
 def _task_status_context(task, *, project_member, is_project_manager):
     """Context for the completion status block (per-assignee done state).
 
-    Each assignee state carries the two verdicts the pane's completion matrix
-    shows side by side: ``done`` is the member's own mark on their current
-    TaskLog, ``reviewed`` is a reviewer's sign-off on that same submission,
+    Each assignee state carries the three verdicts the pane's completion
+    matrix shows side by side: ``done`` is the member's own mark on their
+    current TaskLog, ``reviewed`` is a reviewer's sign-off on that same
+    submission, and ``verified`` is a Lead's check that credits it, each
     named and dated.
 
     Everything here is derived from the task's *current* assignee and
@@ -1262,25 +1393,66 @@ def _task_status_context(task, *, project_member, is_project_manager):
         needs_review and (is_project_manager or task.is_reviewer(project_member))
     )
     locked = _marks_locked(task)
+    individual_dates = {d.member_id: d for d in task.assignee_deadlines.all()}
+    # Each member's own contribution type, on CRediT projects only: the type
+    # means nothing anywhere else. A Lead may change it whether or not the
+    # task is completed — it only decides what their credit is filed under,
+    # and credit stays correctable after completion.
+    tracks_credit = task.project.tracks_credit
+    own_types = (
+        {o.member_id: o for o in task.assignee_contribution_types.all()}
+        if tracks_credit
+        else {}
+    )
+    type_labels = dict(ContributionType.choices)
+    can_set_type = bool(is_project_manager and tracks_credit)
+    now = timezone.now()
+    # A Lead sets members' own dates while the task is open; a completed
+    # task has no dates left to keep.
+    can_set_dates = is_project_manager and task.status != TaskStatus.COMPLETED
+
+    def picker(value, zone):
+        """A date as the Lead's date picker (datetime-local) takes it, in
+        ``zone``."""
+        return picker_value(value, zone)
+
     assignee_states = []
     for member in assignees:
         log = current.get(member.id)
         done = log is not None and log.status == TaskStatus.COMPLETED
+        individual = individual_dates.get(member.id)
+        own_type = own_types.get(member.id)
+        effective_type = (
+            own_type.contribution_type if own_type else task.contribution_type
+        )
+        own_start = individual.start_date if individual else None
+        own_deadline = individual.deadline if individual else None
+        effective_deadline = own_deadline or task.deadline
+        # The zone governing the member's own dates: theirs, else the task's.
+        own_zone = (individual.timezone if individual else "") or task.timezone
         reviewed = log is not None and log.is_reviewed
+        verified = log is not None and log.is_verified
+        # A review given before the task was completed stays as it was, and
+        # so does the done mark it rests on.
+        locked_review = review_locked(task, log)
+        # A part marked before the task was completed and left unreviewed
+        # takes no review now; one marked after it does.
+        closed_review = review_closed(task, log)
         assignee_states.append(
             {
                 "member": member,
-                # Whether *this viewer* may act on *this row's* review, and
-                # (Leads only) on its done mark. Both close once the task is
-                # completed, the same rule the endpoints enforce.
-                "can_review": viewer_reviews and not locked,
+                "review_locked": locked_review,
+                "review_closed": closed_review,
+                # Whether *this viewer* may act on *this row's* review. Open
+                # on a completed task only for a part marked after it.
+                "can_review": viewer_reviews and not closed_review,
                 # Undoing is narrower than making: a reviewer may withdraw
                 # their own verdict and no one else's, while a Lead can clear
                 # any of them. A review whose reviewer's membership row was
                 # deleted has no owner left to withdraw it, so it too is the
                 # Lead's alone.
                 "can_unreview": (
-                    not locked
+                    not locked_review
                     # A task that asks for no review offers no review action,
                     # withdrawal included. A verdict already given stays on
                     # show — see show_review below — it just has no buttons
@@ -1296,9 +1468,16 @@ def _task_status_context(task, *, project_member, is_project_manager):
                         )
                     )
                 ),
+                # A Lead setting or clearing someone's mark is the one action
+                # a completed task still freezes.
                 "can_mark_done": is_project_manager and not locked,
+                # Verifying is the Lead's alone, open on a part marked done
+                # whether or not the task is completed; withdrawing it is
+                # open whenever there is one to withdraw.
+                "can_verify": is_project_manager and done and not verified,
+                "can_unverify": is_project_manager and verified,
                 # The viewer's own row: they tick their own part done (and
-                # untick it) from it, while the task is open.
+                # untick it) from it, even once the task is completed.
                 "is_viewer": bool(project_member and member.id == project_member.id),
                 # The entry the review buttons act on. None until the member
                 # has one seeded, in which case there is nothing to review.
@@ -1323,6 +1502,85 @@ def _task_status_context(task, *, project_member, is_project_manager):
                 "reviewed_at": log.reviewed_at if log is not None else None,
                 # Marked done and still waiting on a reviewer.
                 "awaiting_review": done and not reviewed,
+                "verified": verified,
+                # Null on a verification whose Lead's membership row was
+                # deleted outright; the cell then reports it without a name.
+                "verified_by": log.verified_by if log is not None else None,
+                "verified_at": log.verified_at if log is not None else None,
+                # Marked done and still waiting on a Lead's verification.
+                "awaiting_verification": done and not verified,
+                # The member's own deadline, when a Lead set one: it replaces
+                # the task's for them alone (``AssigneeDeadline``).
+                # The member's own dates, when a Lead set them
+                # (``AssigneeDeadline``): each replaces the task's for them
+                # alone. ``start_date`` / ``deadline`` are what holds for
+                # them, own or the task's.
+                "individual": individual,
+                "own_start": own_start,
+                "own_deadline": own_deadline,
+                "start_date": own_start or task.start_date,
+                "deadline": effective_deadline,
+                # The zone each of those is shown in: the member's own for
+                # an own date, the task's for one they follow.
+                "start_tz": own_zone if own_start else task.timezone,
+                "deadline_tz": own_zone if own_deadline else task.timezone,
+                # The zone saved with their own dates ("" follows the
+                # task's), or None when they have no own dates — the dialog
+                # then starts on the Lead's system timezone.
+                "own_timezone": individual.timezone if individual else None,
+                # What under their name differs from the task — only that
+                # is shown there: an own start or deadline at another
+                # moment than the task's, an own zone other than the
+                # task's (as "Tokyo (UTC+9)"), an own type other than the
+                # task's.
+                "start_differs": own_start is not None and own_start != task.start_date,
+                "deadline_differs": (
+                    own_deadline is not None and own_deadline != task.deadline
+                ),
+                "zone_differs": bool(
+                    individual
+                    and individual.timezone
+                    and canonical(individual.timezone) != canonical(task.timezone)
+                ),
+                "zone_short": short_zone_label(
+                    own_zone, own_deadline or own_start or task.deadline
+                ),
+                "dates_differ": bool(
+                    (own_start is not None and own_start != task.start_date)
+                    or (own_deadline is not None and own_deadline != task.deadline)
+                    or (
+                        individual
+                        and individual.timezone
+                        and canonical(individual.timezone) != canonical(task.timezone)
+                    )
+                ),
+                "type_differs": bool(
+                    own_type and own_type.contribution_type != task.contribution_type
+                ),
+                # Late on their own deadline: open task, part not done.
+                "overdue": bool(
+                    effective_deadline is not None
+                    and effective_deadline < now
+                    and not done
+                    and task.status != TaskStatus.COMPLETED
+                ),
+                # Can a Lead act on their dates?
+                "can_set_dates": can_set_dates,
+                # Pre-fill the Lead's dialog with the member's own dates
+                # only: a date left empty there follows the task's.
+                "own_start_input": picker(own_start, own_zone),
+                "own_deadline_input": picker(own_deadline, own_zone),
+                # The type their credit is filed under: their own, when a
+                # Lead set one (``AssigneeContributionType``), else the
+                # task's. ``own_type`` is the entry, None when they follow
+                # the task's.
+                "tracks_credit": tracks_credit,
+                "own_type": own_type,
+                "contribution_type": effective_type,
+                "contribution_type_label": type_labels.get(
+                    effective_type, effective_type
+                ),
+                "can_set_type": can_set_type,
             }
         )
     my_state = next(
@@ -1336,14 +1594,36 @@ def _task_status_context(task, *, project_member, is_project_manager):
         "assignee_states": assignee_states,
         "done_count": sum(1 for s in assignee_states if s["done"]),
         "reviewed_count": sum(1 for s in assignee_states if s["reviewed"]),
+        "verified_count": sum(1 for s in assignee_states if s["verified"]),
+        # What the Lead's two batch actions would verify, counted so each
+        # button can say how many and switch off at none.
+        "verify_done_count": sum(
+            1 for s in assignee_states if s["done"] and not s["verified"]
+        ),
+        "verify_reviewed_count": sum(
+            1
+            for s in assignee_states
+            if s["done"] and s["reviewed"] and not s["verified"]
+        ),
         "assignee_count": len(assignee_states),
+        # The Lead's "Set deadline for all not done" covers these members.
+        # The Lead's "Set dates for all not done" covers these members.
+        "pending_dates_count": sum(1 for s in assignee_states if not s["done"]),
+        "can_set_dates": can_set_dates,
+        # The Lead's per-member contribution type dialog, on CRediT projects.
+        "can_set_type": can_set_type,
+        "own_type_count": len(own_types),
+        "contribution_type_choices": (
+            _member_type_choices(task, own_types.values()) if can_set_type else []
+        ),
         "is_assignee": my_state is not None,
         "my_done": bool(my_state and my_state["done"]),
         # Whether the viewer reviews on this task at all. The per-row
         # ``can_review`` above is what actually gates the buttons.
         "viewer_reviews": viewer_reviews,
-        # A completed task's marks are frozen; only the Lead's own Mark Not
-        # Complete stays live.
+        # A completed task freezes the marks a Lead sets for others, and the
+        # reviews given before it was completed with the marks under them;
+        # the rest stays live.
         "marks_locked": locked,
         # Whether review is expected of this task at all — see
         # ``Task.needs_review``. Gates who may review.
@@ -1375,6 +1655,8 @@ def _respond_status_block(request, task, *, project_member, is_project_manager):
             task, project_member=project_member, is_project_manager=is_project_manager
         )
         ctx["pane_mode"] = pane_mode
+        # The due hint swapped out of band speaks to the viewer's own deadline.
+        ctx["project_member"] = project_member
         # The side pane sends surface=pane with every request made inside it
         # (an inherited hx-vals on its root), so pieces that are laid out
         # differently there come back in the pane's shape.
@@ -1405,15 +1687,18 @@ class TaskStatusBlockView(LoginRequiredMixin, TaskMemberAccessMixin, View):
 
 
 class TaskCompleteView(LoginRequiredMixin, TaskMemberAccessMixin, View):
-    """An assignee marks *their own* part of an INDIVIDUAL-mode task done."""
+    """An assignee marks *their own* part of an INDIVIDUAL-mode task done.
+
+    Open on a completed task too: closing it is the Lead's call about the
+    task, not a verdict on who did their part, so it does not stop the
+    assignees still to tick from recording theirs.
+    """
 
     def post(self, request, *args, **kwargs):
         if self.project_member is None:
             return HttpResponseBadRequest("No project membership.")
         if not self.task.assigned_members.filter(pk=self.project_member.pk).exists():
             return HttpResponseForbidden("Only an assignee can mark their part done.")
-        if _marks_locked(self.task):
-            return HttpResponseForbidden(_LOCKED_MESSAGE)
         mark_own_done(task=self.task, member=self.project_member)
         return _respond_status_block(
             request, self.task,
@@ -1423,15 +1708,21 @@ class TaskCompleteView(LoginRequiredMixin, TaskMemberAccessMixin, View):
 
 
 class TaskUndoOwnView(LoginRequiredMixin, TaskMemberAccessMixin, View):
-    """An assignee undoes their own INDIVIDUAL-mode completion."""
+    """An assignee undoes their own INDIVIDUAL-mode completion.
+
+    Open on a completed task, like :class:`TaskCompleteView` — even where a
+    review given before the task was completed rests on the mark, which no
+    one else can withdraw (``services.review_locked``). The mark is the
+    assignee's own statement about their work, so they can always take it
+    back; the review and the verification standing on it go with it, along
+    with the credit the verification wrote. The task stays completed.
+    """
 
     def post(self, request, *args, **kwargs):
         if self.project_member is None:
             return HttpResponseBadRequest("No project membership.")
         if not self.task.assigned_members.filter(pk=self.project_member.pk).exists():
             return HttpResponseForbidden("Only an assignee can undo their mark.")
-        if _marks_locked(self.task):
-            return HttpResponseForbidden(_LOCKED_MESSAGE)
         reopen_own(task=self.task, member=self.project_member)
         return _respond_status_block(
             request, self.task,
@@ -1478,6 +1769,11 @@ def _task_activity_context(task, *, is_project_manager):
     }
 
 
+def _assignee_ids(task) -> set[int]:
+    """The ``ProjectMember`` ids currently assigned to ``task``, from the DB."""
+    return set(task.assigned_members.values_list("pk", flat=True))
+
+
 def _seed_assignee_logs(task, actor=None) -> bool:
     """Seed a TaskLog (Activity & comments entry) for each assigned member
     that doesn't have one yet.
@@ -1518,7 +1814,12 @@ class TaskAssignView(
         if not form.is_valid():
             return HttpResponseBadRequest("Invalid assignment data.")
         members = form.cleaned_data.get("assigned_members") or []
+        previous_ids = _assignee_ids(self.task)
         self.task.assigned_members.set(members)
+        notify_new_assignees(
+            [(self.task, _assignee_ids(self.task) - previous_ids)],
+            assigned_by=request.user,
+        )
         # Ensure every assigned member has an Activity & comments entry. Keying
         # off existing logs makes this idempotent and also backfills members
         # assigned without a log.
@@ -1616,12 +1917,16 @@ class TaskLogReviewView(LoginRequiredMixin, TaskMemberAccessMixin, View):
     at once and a member removed from the project loses the action with their
     membership.
 
-    Both directions close once the task is marked completed, like the
-    assignees' own marks, and neither opens at all on a task that asks for no
-    review — the Reviewed column is not drawn there, so the endpoint behind it
-    should not answer either. Withdrawing is the narrower of the two: a
-    reviewer may take back their own verdict and no one else's, while a Lead
-    can clear any review on the task.
+    On a completed task, a part marked done after it was completed can be
+    reviewed, and that review withdrawn. A part already marked when the task
+    was completed stays as it stood until a Lead reopens the task: unreviewed
+    it takes no review (``services.review_closed``), reviewed it cannot be
+    withdrawn (``services.review_locked``). Neither direction
+    opens at all on a task that asks for no review: the Reviewed column is not
+    drawn there, so the endpoint behind it should not answer either.
+    Withdrawing is also narrower in who may: a reviewer may take back their
+    own verdict and no one else's, while a Lead can clear any review on the
+    task.
 
     POST ``reviewed=0`` withdraws the review; anything else records one.
     """
@@ -1639,9 +1944,6 @@ class TaskLogReviewView(LoginRequiredMixin, TaskMemberAccessMixin, View):
             return HttpResponseForbidden(
                 "Only a reviewer on this task can review submissions."
             )
-        if _marks_locked(self.task):
-            return HttpResponseForbidden(_LOCKED_MESSAGE)
-
         if request.POST.get("reviewed") in {"0", "false", "no"}:
             if not self.is_project_manager and not (
                 self.project_member is not None
@@ -1651,12 +1953,16 @@ class TaskLogReviewView(LoginRequiredMixin, TaskMemberAccessMixin, View):
                     "Only the reviewer who signed this off, or a Lead, can "
                     "withdraw it."
                 )
+            if review_locked(self.task, log):
+                return HttpResponseForbidden(_REVIEW_LOCKED_MESSAGE)
             clear_review(task_log=log, cleared_by=self.project_member)
         else:
             if not log.is_reviewable:
                 return HttpResponseBadRequest(
                     "That assignee has not marked their part done yet."
                 )
+            if review_closed(self.task, log):
+                return HttpResponseForbidden(_REVIEW_CLOSED_MESSAGE)
             # Reviewing someone who has since been taken off the task would
             # write a verdict the matrix no longer has a row for.
             if not self.task.assigned_members.filter(pk=log.assigned_to_id).exists():
@@ -1668,6 +1974,235 @@ class TaskLogReviewView(LoginRequiredMixin, TaskMemberAccessMixin, View):
             )
             mark_reviewed(task_log=log, reviewer=reviewer)
 
+        return _respond_status_block(
+            request, self.task,
+            project_member=self.project_member,
+            is_project_manager=self.is_project_manager,
+        )
+
+
+class TaskLogVerifyView(LoginRequiredMixin, TaskMemberAccessMixin, View):
+    """A Lead verifies one member's contribution, or withdraws that.
+
+    Verifying is what credits the member (``services.verify_part``). It is
+    open on a completed task as much as an open one, and asks for the part to
+    be marked done but not reviewed: a Lead may verify a part the reviewers
+    have not reached.
+
+    POST ``verified=0`` withdraws the verification; anything else records
+    one. The Lead check is inline, as on the sibling log views.
+    """
+
+    def post(self, request, *args, **kwargs):
+        log = get_object_or_404(
+            TaskLog.objects.filter(task=self.task), pk=kwargs["log_pk"]
+        )
+        if not self.is_project_manager:
+            return HttpResponseForbidden(
+                "Only a Lead can verify a member's contribution."
+            )
+        actor = self.project_member or _fallback_member(request.user, self.project)
+        if request.POST.get("verified") in {"0", "false", "no"}:
+            unverify_part(task_log=log, actor=actor)
+        else:
+            if log.status != TaskStatus.COMPLETED:
+                return HttpResponseBadRequest(
+                    "That assignee has not marked their part done yet."
+                )
+            if not self.task.assigned_members.filter(pk=log.assigned_to_id).exists():
+                return HttpResponseBadRequest(
+                    "That member is no longer assigned to this task."
+                )
+            # Only the member's current entry carries their state; an older
+            # one is history, and crediting it would skip what came after.
+            current = (
+                self.task.task_logs.filter(assigned_to_id=log.assigned_to_id)
+                .order_by("-created_at")
+                .first()
+            )
+            if current is None or current.pk != log.pk:
+                return HttpResponseBadRequest(
+                    "That entry is no longer the member's current one."
+                )
+            verify_part(task_log=log, lead=actor)
+        return _respond_status_block(
+            request, self.task,
+            project_member=self.project_member,
+            is_project_manager=self.is_project_manager,
+        )
+
+
+class TaskVerifyBatchView(LoginRequiredMixin, TaskMemberAccessMixin, View):
+    """A Lead verifies several contributions at once.
+
+    POST ``scope=done`` verifies every part marked done; ``scope=reviewed``
+    every part marked done and reviewed. Parts already verified are skipped,
+    so the action is safe to repeat. See ``services.verify_parts``.
+    """
+
+    def post(self, request, *args, **kwargs):
+        if not self.is_project_manager:
+            return HttpResponseForbidden(
+                "Only a Lead can verify members' contributions."
+            )
+        scope = request.POST.get("scope")
+        if scope not in VerifyScope.ALL:
+            return HttpResponseBadRequest("Choose which parts to verify.")
+        lead = self.project_member or _fallback_member(request.user, self.project)
+        verify_parts(task=self.task, lead=lead, scope=scope)
+        return _respond_status_block(
+            request, self.task,
+            project_member=self.project_member,
+            is_project_manager=self.is_project_manager,
+        )
+
+
+class TaskMemberDatesView(LoginRequiredMixin, TaskMemberAccessMixin, View):
+    """A Lead sets or removes members' own start dates and deadlines.
+
+    POST ``member=<id>`` with ``start_date`` and/or ``deadline`` (and an
+    optional ``reason``) sets that assignee's own dates; a date left empty
+    follows the task's, and both empty removes them. ``action=clear`` removes
+    them outright. POST ``scope=pending`` with either date gives it to every
+    assignee who has not marked their part done; a date left empty is left
+    as each member has it. Each date may be earlier or later than the
+    task's, which still holds for the task and everyone else.
+
+    Refused on a completed task: there are no dates left to keep.
+    """
+
+    def post(self, request, *args, **kwargs):
+        if not self.is_project_manager:
+            return HttpResponseForbidden(
+                "Only a Lead can change a member's dates."
+            )
+        if self.task.status == TaskStatus.COMPLETED:
+            return HttpResponseForbidden(
+                "This task is marked completed. Mark it not complete before "
+                "changing anyone's dates."
+            )
+        lead = self.project_member or _fallback_member(request.user, self.project)
+        scope = "pending" if request.POST.get("scope") == "pending" else "member"
+        member = current = None
+        if scope == "member":
+            member = self.task.assigned_members.filter(
+                pk=request.POST.get("member") or 0
+            ).first()
+            if member is None:
+                return HttpResponseBadRequest(
+                    "That member is not assigned to this task."
+                )
+            if request.POST.get("action") == "clear":
+                clear_member_dates(task=self.task, member=member, actor=lead)
+                return _respond_status_block(
+                    request, self.task,
+                    project_member=self.project_member,
+                    is_project_manager=self.is_project_manager,
+                )
+            current = self.task.assignee_deadlines.filter(member=member).first()
+        pending = ()
+        if scope == "pending":
+            own = {d.member_id: d for d in self.task.assignee_deadlines.all()}
+            pending = [(m, own.get(m.id)) for m in pending_members(self.task)]
+        form = AssigneeDatesForm(
+            request.POST, task=self.task, scope=scope, current=current,
+            pending=pending, member=member,
+        )
+        if not form.is_valid():
+            return HttpResponseBadRequest(
+                " ".join(str(e) for errors in form.errors.values() for e in errors)
+            )
+        start_date = form.cleaned_data["start_date"]
+        deadline = form.cleaned_data["deadline"]
+        zone = form.cleaned_data["timezone"]
+        reason = form.cleaned_data["reason"]
+        if scope == "pending":
+            if not set_pending_dates(
+                task=self.task,
+                lead=lead,
+                start_date=UNSET if start_date is None else start_date,
+                deadline=UNSET if deadline is None else deadline,
+                timezone=zone,
+                reason=reason or None,
+            ):
+                return HttpResponseBadRequest(
+                    "Every assignee has already marked their part done."
+                )
+        else:
+            set_member_dates(
+                task=self.task, member=member, lead=lead,
+                start_date=start_date, deadline=deadline, timezone=zone,
+                reason=reason,
+            )
+        return _respond_status_block(
+            request, self.task,
+            project_member=self.project_member,
+            is_project_manager=self.is_project_manager,
+        )
+
+
+def _member_type_choices(task, own_types) -> list[tuple[str, str]]:
+    """The types a Lead can give one member: the CRediT roles plus "Other",
+    and any type the task or a member already has, so opening the dialog
+    never quietly rewrites a legacy one."""
+    choices = credit_role_choices(task.contribution_type)
+    values = {value for value, _label in choices}
+    labels = dict(ContributionType.choices)
+    for value in [ContributionType.OTHER, *(o.contribution_type for o in own_types)]:
+        if value not in values and value in labels:
+            choices.append((value, labels[value]))
+            values.add(value)
+    return choices
+
+
+class TaskMemberContributionTypeView(LoginRequiredMixin, TaskMemberAccessMixin, View):
+    """A Lead gives one assignee their own contribution type, or puts them
+    back on the task's.
+
+    POST ``member=<id>`` with ``contribution_type=<value>`` sets that
+    assignee's own type; an empty ``contribution_type`` or ``action=clear``
+    removes it, so the task's type applies to them again. Credit already
+    verified for them moves with the change (see
+    ``services.set_member_contribution_type``).
+
+    Open whether or not the task is completed: the type only decides what
+    the member's credit is filed under, and credit stays correctable. Only
+    on projects tracking contributions as CRediT.
+    """
+
+    def post(self, request, *args, **kwargs):
+        if not self.is_project_manager:
+            return HttpResponseForbidden(
+                "Only a Lead can change a member's contribution type."
+            )
+        if not self.project.tracks_credit:
+            return HttpResponseBadRequest(
+                "This project does not track contributions as CRediT."
+            )
+        member = self.task.assigned_members.filter(
+            pk=request.POST.get("member") or 0
+        ).first()
+        if member is None:
+            return HttpResponseBadRequest("That member is not assigned to this task.")
+        value = (request.POST.get("contribution_type") or "").strip()
+        if request.POST.get("action") == "clear":
+            value = ""
+        if value:
+            current = self.task.assignee_contribution_types.filter(
+                member=member
+            ).first()
+            allowed = {
+                v for v, _label in _member_type_choices(
+                    self.task, [current] if current else []
+                )
+            }
+            if value not in allowed:
+                return HttpResponseBadRequest("Choose a valid contribution type.")
+        lead = self.project_member or _fallback_member(request.user, self.project)
+        set_member_contribution_type(
+            task=self.task, member=member, lead=lead,
+            contribution_type=value or None,
+        )
         return _respond_status_block(
             request, self.task,
             project_member=self.project_member,

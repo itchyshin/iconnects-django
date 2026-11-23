@@ -6,8 +6,7 @@
        open: false,
        options: [
          {value: 'NONE',   label: 'None',                                short: 'None',   disabled: false},
-         {value: 'CREDIT', label: 'Contributor Role Taxonomy (CRediT)',  short: 'CRediT', disabled: false},
-         {value: 'DKP',    label: 'Dragon Kill Points',                  short: 'DKP',    disabled: true}
+         {value: 'CREDIT', label: 'Contributor Role Taxonomy (CRediT)',  short: 'CRediT', disabled: false}
        ],
        value: '{{ contribution_tracking_value|default:"NONE" }}',
        get selected() { return this.options.find(o => o.value === this.value) || this.options[0] },

@@ -9,15 +9,29 @@
   withdrawn by whoever gave it or a Lead (``s.can_unreview``). Everyone else
   sees it read-only.
 
-  Once the task is marked completed, a click shows the card's locked notice
-  instead of toggling the box — see task_done_tick.html.
+  Open whether or not the task is marked completed, with one exception: a
+  review given before the task was completed is locked (``s.review_locked``).
+  Its box stays ticked and clickable but never toggles; a click shows the
+  card's locked notice instead — see task_done_tick.html. A review given
+  after completion can still be withdrawn.
+
+  Likewise, a part marked done before the task was completed and left
+  unreviewed takes no review any more (``s.review_closed``): its box is
+  locked, unticked. Only parts marked after completion can be reviewed.
 {% endcomment %}
-{% if marks_locked %}
-  <input type="checkbox" class="completion-tick completion-tick-review"{% if s.reviewed %} checked{% endif %}
+{% if s.review_locked %}
+  <input type="checkbox" class="completion-tick completion-tick-review" checked
          aria-disabled="true" data-locked
          aria-describedby="task-locked-notice"
-         aria-label="{{ s.member.display_name }}: {% if s.reviewed %}reviewed{% else %}not reviewed{% endif %} (locked)"
-         title="Locked: the task is marked completed"
+         aria-label="{{ s.member.display_name }}: reviewed (locked)"
+         title="Locked: reviewed before the task was marked completed"
+         @click.prevent="showLocked()">
+{% elif s.review_closed %}
+  <input type="checkbox" class="completion-tick completion-tick-review"
+         aria-disabled="true" data-locked
+         aria-describedby="task-locked-notice"
+         aria-label="{{ s.member.display_name }}: not reviewed (locked)"
+         title="Locked: marked done before the task was marked completed"
          @click.prevent="showLocked()">
 {% elif s.reviewed %}
   {% if s.can_unreview %}
@@ -42,6 +56,6 @@
          title="Tick to mark reviewed">
 {% else %}
   <input type="checkbox" class="completion-tick completion-tick-review" disabled
-         aria-label="{{ s.member.display_name }}: {% if s.done and not marks_locked %}awaiting review{% else %}not reviewed{% endif %}"
+         aria-label="{{ s.member.display_name }}: {% if s.done %}awaiting review{% else %}not reviewed{% endif %}"
          {% if not s.done %}title="Can be reviewed once the part is done"{% endif %}>
 {% endif %}

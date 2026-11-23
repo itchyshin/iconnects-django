@@ -9,15 +9,25 @@
 
   The box and its send button share one row. The button is an icon, so its
   name stays on the page for screen readers.
+
+  Typing @ opens a list of the people who can open the task; picking one
+  writes @Name into the box and tags them, which emails them (see
+  mention_list.html). Callers draw this only when can_comment: the task's
+  creator, assignees and reviewers.
 {% endcomment %}
 <form class="flex items-start gap-2"
+      x-data="mentionBox()"
+      @mentions-reset="clear()"
       hx-post="{% url 'comments:create' task_pk=task.pk %}"
       hx-target="{{ target|default:'#task-comments' }}"
       hx-swap="afterbegin"
-      hx-on::after-request="if(event.detail.successful) this.reset()">
+      hx-on::after-request="if(event.detail.successful){ this.reset(); this.dispatchEvent(new CustomEvent('mentions-reset')) }">
   {% csrf_token %}
   <label for="{{ form.content.id_for_label }}" class="sr-only">Comment</label>
-  <div class="flex-1 min-w-0">{{ form.content }}</div>
+  <div class="mention-field relative flex-1 min-w-0">
+    {{ form.content }}
+    {% include "comments/mention_list.html" %}
+  </div>
   <button type="submit"
           class="btn btn-primary btn-square h-12 w-12 min-h-0 shrink-0"
           title="Comment">

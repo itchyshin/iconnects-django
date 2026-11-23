@@ -13,7 +13,7 @@
 {% endcomment %}
 
 {% if not records %}
-  {% include "_components/empty_state.html" with title="No contributions yet" body="Credit appears here as tasks are completed." %}
+  {% include "_components/empty_state.html" with title="No contributions yet" body="Credit appears here as a lead verifies members' parts on tasks." %}
 {% else %}
   <div class="brand-card overflow-x-auto">
     {% comment %}
@@ -29,8 +29,8 @@
           {% include "_components/sortable_header.html" with key="member" label="Member" %}
           {% include "_components/sortable_header.html" with key="task" label="Task" %}
           {% include "_components/sortable_header.html" with key="role" label="Role" %}
-          {% include "_components/sortable_header.html" with key="completed" label="Completed" %}
-          {% include "_components/sortable_header.html" with key="closer" label="Closed by" %}
+          {% include "_components/sortable_header.html" with key="completed" label="Verified" %}
+          {% include "_components/sortable_header.html" with key="closer" label="Verified by" %}
           {% if is_project_manager %}<th scope="col" class="text-right">Actions</th>{% endif %}
         </tr>
       </thead>

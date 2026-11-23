@@ -1,8 +1,10 @@
 """Grid-building for the task calendar view (year / month / week / day).
 
 Buckets tasks (already filtered to those with a calendar-relevant date) by
-local date, using each task's ``deadline`` if set, otherwise its
-``start_date``. Weeks start on Monday throughout.
+date, using each task's ``deadline`` if set, otherwise its ``start_date``,
+each read on the calendar of the task's own timezone (``Task.timezone``) —
+so a task due 11:00 PM in Edmonton sits on that day wherever the server is.
+Weeks start on Monday throughout.
 
 Tasks with *both* ``start_date`` and ``deadline`` set, spanning more than one
 day, are treated as ranges: month/week views draw them as lane-stacked bars
@@ -18,6 +20,8 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 
 from django.utils import timezone
+
+from apps.tasks.timezones import get_zone
 
 VIEWS = ("year", "month", "week", "day")
 
@@ -38,16 +42,24 @@ class DayAgendaItem:
     range_end: date | None = None
 
 
-def _to_local_date(dt) -> date:
-    return timezone.localtime(dt).date() if timezone.is_aware(dt) else dt.date()
+def _to_local_date(dt, zone=None) -> date:
+    """``dt``'s date in ``zone`` (an IANA name; the server's when empty)."""
+    if not timezone.is_aware(dt):
+        return dt.date()
+    return dt.astimezone(get_zone(zone)).date() if zone else timezone.localtime(dt).date()
+
+
+def _task_zone(task):
+    return getattr(task, "timezone", None)
 
 
 def task_calendar_date(task) -> date | None:
-    """Return the local date a task should be plotted on, or ``None``."""
+    """Return the date, in the task's zone, it should be plotted on, or
+    ``None``."""
     dt = task.deadline or task.start_date
     if dt is None:
         return None
-    return _to_local_date(dt)
+    return _to_local_date(dt, _task_zone(task))
 
 
 def task_range(task) -> tuple[date, date] | None:
@@ -57,8 +69,8 @@ def task_range(task) -> tuple[date, date] | None:
     """
     if task.start_date is None or task.deadline is None:
         return None
-    start = _to_local_date(task.start_date)
-    end = _to_local_date(task.deadline)
+    start = _to_local_date(task.start_date, _task_zone(task))
+    end = _to_local_date(task.deadline, _task_zone(task))
     if start == end:
         return None
     if start > end:
@@ -82,8 +94,9 @@ def task_date_label(task, today: date | None = None) -> dict:
     Both are "" when the task has no dates at all.
     """
     empty = {"short": "", "full": ""}
-    start = _to_local_date(task.start_date) if task.start_date else None
-    end = _to_local_date(task.deadline) if task.deadline else None
+    zone = _task_zone(task)
+    start = _to_local_date(task.start_date, zone) if task.start_date else None
+    end = _to_local_date(task.deadline, zone) if task.deadline else None
     if start is None and end is None:
         return empty
     if today is None:

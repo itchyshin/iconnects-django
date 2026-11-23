@@ -5,3 +5,6 @@ class TasksConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.tasks"
     label = "tasks"
+
+    def ready(self) -> None:
+        from apps.tasks import signals  # noqa: F401 — registers receivers

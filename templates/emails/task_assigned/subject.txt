@@ -1,0 +1,1 @@
+{% autoescape off %}{% if entries|length == 1 %}i-connects: you were assigned "{{ entries.0.task.name }}"{% else %}i-connects: you were assigned {{ entries|length }} tasks{% endif %}{% endautoescape %}

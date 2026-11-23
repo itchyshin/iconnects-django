@@ -26,8 +26,8 @@
           <a href="https://credit.niso.org/" target="_blank" rel="noopener noreferrer"
              class="text-brand-navy underline hover:text-brand-coral">CRediT</a>.
           You earn it on a task when you mark your part done and a lead
-          completes the task &mdash; where the task has reviewers, once your
-          submission has been reviewed.
+          verifies it, under the task&rsquo;s CRediT role. Unticking Verified,
+          or undoing your Done mark, takes it back.
         </p>
       </div>
     </div>
@@ -92,9 +92,9 @@
 
   {% if contribution_total == 0 %}
     {% if selected_project %}
-      {% include "_components/empty_state.html" with title="No contributions on this project yet" body="Credit appears here when a lead completes a task you have marked done." %}
+      {% include "_components/empty_state.html" with title="No contributions on this project yet" body="Credit appears here when a lead verifies a part you have marked done." %}
     {% else %}
-      {% include "_components/empty_state.html" with title="No contributions yet" body="Credit appears here when a lead completes a task you have marked done." %}
+      {% include "_components/empty_state.html" with title="No contributions yet" body="Credit appears here when a lead verifies a part you have marked done." %}
     {% endif %}
   {% else %}
 
@@ -111,8 +111,8 @@
             <th scope="col">Project</th>
             <th scope="col">Task</th>
             <th scope="col">Role</th>
-            <th scope="col">Completed</th>
-            <th scope="col">Closed by</th>
+            <th scope="col">Verified</th>
+            <th scope="col">Verified by</th>
           </tr>
         </thead>
         <tbody>

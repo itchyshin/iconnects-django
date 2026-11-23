@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% comment %}
+  Shown (403) when someone other than the invitee opens an invitation link,
+  e.g. on a shared computer where another person is signed in. It says
+  nothing about the project or the invitee. "Sign out and continue" signs
+  out and opens the sign-in page with the invitation link as ``next``, so
+  the invitee lands on their invitation once signed in.
+
+  Context: invitation_path (str), the invitation link's path.
+{% endcomment %}
+
+{% block title %}Invitation for another account &mdash; i&bull;CONNECTS{% endblock %}
+
+{% block page_header %}{% endblock %}
+
+{% block content %}
+<div class="max-w-md mx-auto">
+  <div class="brand-card p-6 sm:p-8 text-center">
+    <div class="mx-auto w-12 h-12 rounded-full bg-brand-navy/10 flex items-center justify-center mb-4">
+      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+           stroke-width="1.6" stroke="currentColor" class="w-6 h-6 text-brand-navy" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round"
+              d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" />
+      </svg>
+    </div>
+
+    <h1 class="text-xl font-semibold text-brand-navy">This invitation is for another account</h1>
+
+    <p class="mt-4 text-brand-text">
+      You&rsquo;re signed in as <strong>{{ user.email }}</strong>, but this
+      invitation was sent to someone else.
+    </p>
+    <p class="mt-2 text-sm text-brand-text/70">
+      If it was sent to you, sign out and sign in with the account it was sent to.
+    </p>
+
+    <div class="flex gap-2 justify-center mt-6">
+      <a href="{% url 'projects:my_list' %}" class="btn btn-ghost">Go to my projects</a>
+      <form method="post" action="{% url 'accounts:logout' %}">
+        {% csrf_token %}
+        <input type="hidden" name="next" value="{% url 'accounts:login' %}?next={{ invitation_path|urlencode:'' }}">
+        <button type="submit" class="btn bg-brand-coral hover:bg-brand-coral/90 text-white border-0">
+          Sign out and continue
+        </button>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}

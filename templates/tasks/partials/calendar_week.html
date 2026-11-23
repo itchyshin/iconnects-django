@@ -1,3 +1,4 @@
+{% load task_tags %}
 {# Week view — 7 day columns with full task pills — included by task_calendar_view.html when calendar_view == 'week'. #}
 {# `calendar_week.lanes` are lane-stacked range bars (tasks spanning >1 day) shown as a #}
 {# horizontal strip above the day columns; `days[].tasks` are single-day tasks, shown as #}
@@ -47,7 +48,7 @@
               <span class="text-brand-navy truncate min-w-0">{{ task.name }}</span>
             </span>
             <span class="text-brand-text/50 text-[10px]">
-              {% if task.deadline %}Due {{ task.deadline|date:"g:i A" }}{% elif task.start_date %}Starts {{ task.start_date|date:"g:i A" }}{% endif %}
+              {% if task.deadline %}Due {{ task.deadline|in_zone:task.timezone|date:"g:i A T" }}{% elif task.start_date %}Starts {{ task.start_date|in_zone:task.timezone|date:"g:i A T" }}{% endif %}
             </span>
           </div>
         {% empty %}

@@ -1,0 +1,15 @@
+{% extends "emails/base_email.html" %}
+{% block title %}You were mentioned in a comment{% endblock %}
+{% block content %}
+<p>Hi {{ user.display_name }},</p>
+
+<p>
+  {{ author_name }} mentioned you in a comment on
+  <a href="{{ url }}" style="color:#1d4ed8;font-weight:600;">{{ task.name }}</a>
+  &mdash; {{ project.name }}:
+</p>
+
+<blockquote style="margin:0 0 16px;padding:8px 12px;border-left:3px solid #e5e7eb;color:#374151;white-space:pre-line;">{{ excerpt }}</blockquote>
+
+<p><a href="{{ url }}" style="color:#1d4ed8;">Open the task</a> to read the thread.</p>
+{% endblock %}

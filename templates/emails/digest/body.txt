@@ -1,4 +1,5 @@
 {% extends "emails/base_email.txt" %}
+{% load task_tags %}
 {% block content %}
 Hi {{ user.name|default:user.email }},
 
@@ -6,7 +7,7 @@ Here is your {{ frequency }} summary of activity on i-connects.
 
 Overdue tasks
 -------------
-{% if overdue_tasks %}{% for task in overdue_tasks %}- {{ task.name }}{% if task.project %} ({{ task.project.name }}){% endif %}{% if task.deadline %} -- due {{ task.deadline|date:"M j, Y" }}{% endif %}
+{% if overdue_tasks %}{% for task in overdue_tasks %}- {{ task.name }}{% if task.project %} ({{ task.project.name }}){% endif %}{% if task.my_deadline %} -- due {{ task.my_deadline|in_zone:task.my_deadline_tz|date:"M j, Y" }}{% if task.my_deadline != task.deadline %} (your individual deadline){% endif %}{% endif %}
 {% endfor %}{% else %}No overdue tasks.
 {% endif %}
 Recent project activity

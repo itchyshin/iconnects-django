@@ -38,10 +38,10 @@ def display_name(user) -> str:
 def closed_by(record) -> str:
     """Name the person behind a contribution record.
 
-    Normally the lead who closed the task the credit was earned on — or,
-    where a reviewer's sign-off was the last one outstanding and closed it,
-    that reviewer. On a record a lead entered by hand it is whoever entered
-    it; the row badges itself as hand-entered, so the two do not blur.
+    Normally the Lead who verified the part the credit was earned on (on
+    records written before verification existed, whoever closed the task).
+    On a record a lead entered by hand it is whoever entered it; the row
+    badges itself as hand-entered, so the two do not blur.
 
     ``verified_by`` is SET_NULL, so the record outlives the account: say "a
     former member" rather than leaving the column blank, the same way the

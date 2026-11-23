@@ -1,4 +1,5 @@
 {# One comment in a thread. #}
+{% load comment_tags %}
 <div id="comment-{{ comment.pk }}"
      class="flex items-start gap-3"
      hx-post="{% url 'comments:mark_read' pk=comment.pk %}"
@@ -10,7 +11,15 @@
   <div class="flex-1 min-w-0">
     <div class="flex items-baseline justify-between gap-2">
       <div class="min-w-0">
-        <span class="font-medium text-brand-navy text-sm">{{ comment.author.display_name }}</span>
+        {# The name opens the writer's profile, as names do on the Contributors page. #}
+        {% with who=comment.author_user %}
+          {% if who %}
+            <a href="{% url 'public_profile' pk=who.pk %}"
+               class="comment-author font-medium text-brand-navy text-sm hover:text-brand-coral">{{ who.display_name }}</a>
+          {% else %}
+            <span class="comment-author font-medium text-brand-navy text-sm">{{ comment.author.display_name }}</span>
+          {% endif %}
+        {% endwith %}
         {% comment %}
           text-xs to match the dates in the completion matrix; the timestamp is
           a note on the comment, not part of its body.
@@ -28,14 +37,20 @@
                 title="Edited {{ comment.updated_at|date:'M j, Y g:i A' }}">(edited)</span>
         {% endif %}
       </div>
-      {# Text-only actions: no glyphs on this row. #}
+      {% comment %}
+        Text-only actions: no glyphs on this row. Edit is for an author who
+        can still comment on the task (an edit can tag people); one taken off
+        the task keeps Delete.
+      {% endcomment %}
       {% if project_member and comment.author_id == project_member.id %}
         <div class="flex gap-2 shrink-0">
+          {% if can_comment %}
           <button class="text-xs text-brand-text/50 hover:underline"
                   aria-label="Edit comment"
                   hx-get="{% url 'comments:edit' pk=comment.pk %}"
                   hx-target="#comment-{{ comment.pk }}"
                   hx-swap="outerHTML">Edit</button>
+          {% endif %}
           <button class="text-xs text-brand-text/50 hover:text-error hover:underline"
                   aria-label="Delete comment"
                   hx-post="{% url 'comments:delete' pk=comment.pk %}"
@@ -77,7 +92,7 @@
       <div x-ref="body"
            id="comment-body-{{ comment.pk }}"
            class="text-sm text-brand-text whitespace-pre-line break-words line-clamp-3"
-           :class="{ 'line-clamp-3': !expanded }">{{ comment.content }}</div>
+           :class="{ 'line-clamp-3': !expanded }">{{ comment|comment_body }}</div>
       <button type="button" x-show="overflowing" x-cloak
               class="mt-0.5 text-xs font-medium text-brand-navy hover:underline"
               aria-controls="comment-body-{{ comment.pk }}"

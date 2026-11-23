@@ -113,11 +113,7 @@ class AdminConsoleView(LoginRequiredMixin, UserPassesTestMixin, TemplateView):
         ctx["task_count"] = Task.objects.count()
         ctx["open_task_count"] = Task.objects.exclude(status=TaskStatus.COMPLETED).count()
         ctx["completed_task_count"] = Task.objects.filter(status=TaskStatus.COMPLETED).count()
-        ctx["overdue_task_count"] = (
-            Task.objects.exclude(status=TaskStatus.COMPLETED)
-            .filter(deadline__lt=now)
-            .count()
-        )
+        ctx["overdue_task_count"] = Task.objects.overdue(now).count()
 
         # Contributions
         ctx["contribution_count"] = ContributionRecord.objects.count()

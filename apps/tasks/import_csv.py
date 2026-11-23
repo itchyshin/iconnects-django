@@ -25,6 +25,8 @@ from apps.audit.services import AuditAction, log_action
 from apps.core.enums import CompletedAs, ContributionType
 from apps.projects.models import ProjectMember
 from apps.tasks.models import KanbanBoard, Task, TaskLog
+from apps.tasks.services import notify_new_assignees
+from apps.tasks.timezones import canonical, default_zone_name, from_wall
 
 
 REQUIRED_COLUMNS = ["name"]
@@ -35,6 +37,7 @@ OPTIONAL_COLUMNS = [
     "column",
     "assignee_emails",
     "priority",
+    "timezone",
 ]
 
 
@@ -105,8 +108,14 @@ def import_rows(
     rows: list[dict],
     *,
     user,
+    timezone: str | None = None,
 ) -> tuple[int, list[str]]:
     """Create Tasks for each row. Returns ``(created_count, errors)``.
+
+    Each task's zone is the row's ``timezone`` column where it names one,
+    else ``timezone`` (the zone picked on the import form, which starts on
+    the Lead's system timezone), else the server's. A row's deadline is
+    read in its task's zone; a bare date is due at 5:00 PM there.
 
     All database work runs inside a single ``transaction.atomic`` block; if
     any row raises an unexpected exception the whole import is rolled back
@@ -126,6 +135,7 @@ def import_rows(
 
     errors: list[str] = []
     created = 0
+    assignments: list[tuple[Task, set[int]]] = []
 
     try:
         with transaction.atomic():
@@ -139,7 +149,13 @@ def import_rows(
                     errors.append(f"row {row_number}: name is required")
                     continue
 
-                deadline, deadline_err = _parse_deadline(row.get("deadline"))
+                zone, zone_err = _parse_timezone(row.get("timezone"))
+                if zone_err:
+                    errors.append(f"row {row_number}: {zone_err}")
+                    continue
+                zone = zone or canonical(timezone) or default_zone_name()
+
+                deadline, deadline_err = _parse_deadline(row.get("deadline"), zone)
                 if deadline_err:
                     errors.append(f"row {row_number}: {deadline_err}")
                     # Skip this row — a bad deadline is a hard parse error.
@@ -177,6 +193,7 @@ def import_rows(
                     name=name,
                     description=(row.get("description") or "") or None,
                     deadline=deadline,
+                    timezone=zone,
                     contribution_type=contribution_type,
                     is_priority=_parse_priority(row.get("priority")),
                 )
@@ -191,6 +208,9 @@ def import_rows(
                     )
                 if assignee_members:
                     task.assigned_members.set(assignee_members)
+                    assignments.append(
+                        (task, {member.pk for member in assignee_members})
+                    )
                     for member in assignee_members:
                         TaskLog.objects.create(
                             task=task,
@@ -210,6 +230,10 @@ def import_rows(
                     metadata={"name": task.name, "via": "csv_import"},
                 )
                 created += 1
+
+            # One email per assignee listing all their new tasks, sent once
+            # the import commits; a rolled-back import tells nobody.
+            notify_new_assignees(assignments, assigned_by=user)
     except Exception as exc:  # noqa: BLE001 — we want to swallow and report
         return 0, [f"import failed: {exc}"]
 
@@ -276,18 +300,40 @@ def _resolve_column(
     )
 
 
-def _parse_deadline(raw: Any) -> tuple[Any, str | None]:
-    """Return ``(value, error)``. Empty string → ``(None, None)``."""
+def _parse_timezone(raw: Any) -> tuple[str | None, str | None]:
+    """Return ``(zone, error)``. Empty → ``(None, None)``."""
+    text = (raw or "").strip() if isinstance(raw, str) else ""
+    if not text:
+        return None, None
+    zone = canonical(text)
+    if zone is None:
+        return None, f"unknown timezone {text!r}"
+    return zone, None
+
+
+def _parse_deadline(raw: Any, zone: str | None = None) -> tuple[Any, str | None]:
+    """Return ``(value, error)``. Empty string → ``(None, None)``.
+
+    Clock times are read in ``zone`` (the server's when None); a bare date
+    is due at 5:00 PM there, as on the task form. A value carrying its own
+    offset keeps it.
+    """
+    from datetime import datetime
+
+    from apps.tasks.timezones import DEFAULT_DUE_TIME
+
     text = (raw or "").strip() if isinstance(raw, str) else raw
     if not text:
         return None, None
-    # Accept ``YYYY-MM-DD HH:MM`` / ``YYYY-MM-DDTHH:MM`` first.
-    dt = parse_datetime(text)
-    if dt is not None:
-        return dt, None
+    zone = zone or default_zone_name()
+    # A bare ``YYYY-MM-DD`` first: parse_datetime would take it as midnight.
     d = parse_date(text)
     if d is not None:
-        return d, None
+        return from_wall(datetime.combine(d, DEFAULT_DUE_TIME), zone), None
+    # Then ``YYYY-MM-DD HH:MM`` / ``YYYY-MM-DDTHH:MM``.
+    dt = parse_datetime(text)
+    if dt is not None:
+        return from_wall(dt, zone), None
     return None, f"invalid deadline {text!r}"
 
 

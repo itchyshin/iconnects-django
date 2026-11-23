@@ -92,12 +92,15 @@ def test_import_rows_skips_blank_name(user):
 @pytest.mark.django_db
 def test_import_rows_handles_unknown_column_creates_it(user):
     project = _make_project(user)
-    assert KanbanBoard.objects.filter(project=project).count() == 1
+    columns = KanbanBoard.objects.filter(project=project)
+    assert not columns.filter(name="Backlog").exists()
+    columns_before = columns.count()
     rows = [{"name": "A", "column": "Backlog"}]
     created, errors = import_rows(project, rows, user=user)
     assert created == 1
     assert errors == []
-    assert KanbanBoard.objects.filter(project=project, name="Backlog").exists()
+    assert columns.filter(name="Backlog").exists()
+    assert columns.count() == columns_before + 1
     task = Task.objects.get(project=project)
     assert task.container.name == "Backlog"
 

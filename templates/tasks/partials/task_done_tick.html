@@ -10,19 +10,17 @@
   for their own part (``s.is_viewer``, through the self-mark endpoints).
   Everyone else sees it read-only.
 
-  Once the task is marked completed its marks freeze, for everyone. The box
-  then stays clickable but never toggles: a click shows the card's locked
-  notice (``showLocked``, from task_status_block.html) instead, saying the
-  task has to be marked not complete first.
+  Once the task is marked completed, the marks a Lead sets for others
+  freeze; an assignee's own box stays live, so whoever had not ticked when
+  the Lead closed it still can, and whoever had can take it back. Unticking
+  clears the part's review and verification with it, even a review given
+  before completion that no one else can withdraw. A frozen box stays
+  clickable but never
+  toggles: a click shows the card's locked notice (``showLocked``, from
+  task_status_block.html) instead, saying the task has to be marked not
+  complete first.
 {% endcomment %}
-{% if marks_locked %}
-  <input type="checkbox" class="completion-tick completion-tick-done"{% if s.done %} checked{% endif %}
-         aria-disabled="true" data-locked
-         aria-describedby="task-locked-notice"
-         aria-label="{{ s.member.display_name }}: {% if s.done %}done{% else %}not done{% endif %} (locked)"
-         title="Locked: the task is marked completed"
-         @click.prevent="showLocked()">
-{% elif s.can_mark_done %}
+{% if s.can_mark_done %}
   <input type="checkbox" class="completion-tick completion-tick-done"{% if s.done %} checked{% endif %}
          hx-post="{% url 'tasks:member_done' pk=task.pk member_pk=s.member.pk %}"
          hx-vals='{"done": "{% if s.done %}0{% else %}1{% endif %}", "pane_mode": "1"}'
@@ -30,7 +28,7 @@
          hx-swap="outerHTML"
          aria-label="Mark {% if s.is_viewer %}your{% else %}{{ s.member.display_name }}'s{% endif %} part {% if s.done %}not done{% else %}done{% endif %}"
          title="{% if s.done %}Untick to undo{% else %}Tick to mark done{% endif %}">
-{% elif s.is_viewer and not marks_locked %}
+{% elif s.is_viewer %}
   <input type="checkbox" class="completion-tick completion-tick-done"{% if s.done %} checked{% endif %}
          hx-post="{% if s.done %}{% url 'tasks:undo' pk=task.pk %}{% else %}{% url 'tasks:complete' pk=task.pk %}{% endif %}"
          hx-vals='{"pane_mode": "1"}'
@@ -38,6 +36,13 @@
          hx-swap="outerHTML"
          aria-label="{% if s.done %}Mark your part not done{% else %}Mark your part done{% endif %}"
          title="{% if s.done %}Untick to undo{% else %}Tick to mark your part done{% endif %}">
+{% elif marks_locked %}
+  <input type="checkbox" class="completion-tick completion-tick-done"{% if s.done %} checked{% endif %}
+         aria-disabled="true" data-locked
+         aria-describedby="task-locked-notice"
+         aria-label="{{ s.member.display_name }}: {% if s.done %}done{% else %}not done{% endif %} (locked)"
+         title="Locked: the task is marked completed"
+         @click.prevent="showLocked()">
 {% else %}
   <input type="checkbox" class="completion-tick completion-tick-done" disabled{% if s.done %} checked{% endif %}
          aria-label="{{ s.member.display_name }}: {% if s.done %}done{% else %}not done yet{% endif %}">

@@ -1,9 +1,10 @@
-"""ContributionRecord: the ledger of credit earned on closed tasks.
+"""ContributionRecord: the ledger of credit a Lead has verified.
 
-A record is written when a project lead closes a task on a project that
-tracks contributions as CRediT, one per user behind each assignee who
-marked their own part done (and had it reviewed, where the task carries
-reviewers). Reopening the task withdraws them again.
+On a project that tracks contributions as CRediT, a record is written when
+a Lead verifies an assignee's part, one per user behind that assignee. The
+part must be marked done; a review is not required. Withdrawing the
+verification, or the assignee undoing their done mark, takes it back. The
+task being closed or reopened plays no part.
 
 The rows follow task state rather than standing apart from it, so every FK
 cascades: deleting a task, a project or a user takes the credit recorded

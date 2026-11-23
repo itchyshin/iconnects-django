@@ -1,0 +1,130 @@
+{% comment %}
+  A timezone picker: a search box for a city or country (like Google
+  Calendar's), starting on the user's system timezone.
+
+    {% include "_components/timezone_select.html" with name="timezone" id="id_timezone" saved=form.timezone.value label="Timezone" %}
+
+  Params:
+    name           the field name it submits
+    id             the id of the button that opens it (for its label)
+    saved          the zone already saved, if any. When empty, the picker
+                   starts on the system timezone the browser reports
+                   (Intl.DateTimeFormat().resolvedOptions().timeZone), read
+                   through ``timezone_aliases_json`` for old names such as
+                   Asia/Calcutta.
+    label          the visible label (default "Timezone")
+    help           help text under it
+    errors         the field's errors, if any
+    inherit_label  set to offer a first "Same as task (…)" entry whose value
+                   is "" (the member-dates dialog)
+    inherit_zone   the task's zone, which that entry stands for
+    managed        set when the enclosing dialog decides the zone each time
+                   it opens: the picker then listens for the ``open-dates``
+                   window event and reads ``timezone`` off its detail —
+                   null (or missing) for "nothing saved", which starts on
+                   the system timezone, "" for "Same as task", else a zone.
+
+  The native <select> underneath is what the form submits and what other
+  scripts listen to (the task form's individual-dates panel watches its
+  change event). It holds only the saved zone and the empty entry ("Same
+  as task", or the server's ``TIME_ZONE``): the full list of ~420 zones is
+  fetched once per page as JSON (``tasks:timezones``) rather than written
+  into every form, and a zone picked from it is added to the select. With
+  script the select is hidden behind the search box; without script it
+  is the picker, offering the saved zone or the server's. The note under
+  it names the timezone in use and where it came from: "Timezone used:
+  (UTC−06:00) Edmonton, Canada — your system timezone.", or the server's
+  when the browser cannot tell (or without script), or the task's for
+  "Same as task".
+{% endcomment %}
+{% load task_tags %}
+{% timezone_option saved as current %}
+{% default_timezone_name as server_zone %}
+<div class="form-control w-full mb-3"
+     x-data="timezoneSelect({% if managed %}undefined{% elif saved %}'{{ saved|escapejs }}'{% else %}null{% endif %})"
+     {% if managed %}@open-dates.window="apply($event.detail.timezone === undefined ? null : $event.detail.timezone)"{% endif %}
+     @keydown.escape="if (open) { $event.preventDefault(); $event.stopPropagation(); close() }"
+     @click.outside="close()"
+     data-timezone-picker>
+  <label for="{{ id }}" class="label py-0.5 pb-1">
+    <span class="label-text text-sm text-brand-navy font-medium">{{ label|default:"Timezone" }}</span>
+  </label>
+  {% comment %}
+    No id on purpose: when htmx swaps new HTML in (the completion table
+    after every action, the pop-up editor after a refused save) it restores
+    the old element's class and style on any id the old and new content
+    share, then settles to the new ones — which would undo the inline
+    style that hides this select, and show it beside the search box.
+  {% endcomment %}
+  <select name="{{ name }}" class="select select-bordered w-full"
+          aria-label="{{ label|default:"Timezone" }}"
+          x-show="!ready" x-ref="select" @change="refresh()"
+          data-server-zone="{{ server_zone }}"
+          data-tz-aliases="{% timezone_aliases_json %}"
+          data-tz-url="{% url 'tasks:timezones' %}"
+          data-timezone-select>
+    {% if inherit_label %}
+      <option value=""{% if not saved %} selected{% endif %} data-label="{{ inherit_label }}" data-display="{{ inherit_label }}" data-inherit-zone="{{ inherit_zone }}" data-search="same as task {{ inherit_label }}">{{ inherit_label }}</option>
+    {% elif not saved %}
+      <option value="" selected data-label="Server default ({{ server_zone }})" data-display="Server default ({{ server_zone }})" data-search="server default {{ server_zone }}">Server default ({{ server_zone }})</option>
+    {% endif %}
+    {% if current %}
+      <option value="{{ current.value }}" selected data-display="{{ current.display }}">{{ current.display }}</option>
+    {% endif %}
+  </select>
+
+  {# The search box, drawn once Alpine is running. #}
+  <div x-show="ready" x-cloak>
+    <button type="button" id="{{ id }}"
+            class="input input-bordered w-full flex items-center justify-between gap-2 text-left"
+            :aria-expanded="open ? 'true' : 'false'" aria-haspopup="listbox"
+            @click="toggle()" data-timezone-button>
+      <span class="truncate" x-text="display"></span>
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4 shrink-0 text-brand-text/60" aria-hidden="true"><path fill-rule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd"/></svg>
+    </button>
+    <div x-show="open" x-cloak class="mt-1 rounded-lg border border-gray-300 bg-base-100 shadow-lg" data-timezone-panel>
+      {# The focus indicator is the row's coral underline (the field inside has none), as Google Calendar's search does. #}
+      <div class="flex items-center gap-2 px-3 border-b-2 border-gray-200 has-[:focus-visible]:border-brand-coral">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4 shrink-0 text-brand-text/60" aria-hidden="true"><path fill-rule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM2 9a7 7 0 1 1 12.452 4.391l3.328 3.329a.75.75 0 1 1-1.06 1.06l-3.329-3.328A7 7 0 0 1 2 9Z" clip-rule="evenodd"/></svg>
+        <input type="text" x-ref="search" x-model="query" @input="active = 0"
+               @keydown.arrow-down.prevent="move(1)" @keydown.arrow-up.prevent="move(-1)"
+               @keydown.enter.prevent="pick(results[active])"
+               role="combobox" aria-autocomplete="list" :aria-expanded="open ? 'true' : 'false'"
+               aria-controls="{{ id }}-list" :aria-activedescendant="results[active] ? '{{ id }}-opt-' + active : null"
+               aria-label="Search for a city or country"
+               placeholder="Type to search for a city or country"
+               autocomplete="off" spellcheck="false"
+               class="w-full py-2.5 text-sm bg-transparent focus:outline-none focus-visible:outline-none"
+               data-timezone-search>
+      </div>
+      <ul id="{{ id }}-list" role="listbox" x-ref="list" class="max-h-64 overflow-y-auto py-1" data-timezone-results>
+        <template x-for="(o, i) in results" :key="o.value + '|' + i">
+          <li :id="'{{ id }}-opt-' + i" role="option" :aria-selected="o.value === value ? 'true' : 'false'"
+              @click="pick(o)" @mousemove="active = i"
+              class="px-3 py-2 cursor-pointer"
+              :class="i === active ? 'bg-brand-lighter' : ''">
+            <div class="flex items-baseline justify-between gap-3">
+              <span class="text-sm font-medium text-brand-navy" x-text="o.label"></span>
+              <span class="text-xs text-brand-text/60 shrink-0" x-text="o.offset"></span>
+            </div>
+            <div class="text-xs text-brand-text/60 truncate" x-show="o.detail" x-text="o.detail"></div>
+          </li>
+        </template>
+        <li x-show="!results.length" class="px-3 py-2 text-sm text-brand-text/60" x-text="loading ? 'Loading timezones…' : 'No city or country matches.'"></li>
+      </ul>
+      <div class="flex justify-end gap-2 border-t border-gray-200 px-3 py-2" x-show="systemMatch">
+        <button type="button" class="btn btn-ghost btn-sm text-brand-navy" @click="useSystem()" data-timezone-use-system>Use current time zone</button>
+      </div>
+    </div>
+  </div>
+
+  <label class="label pt-1">
+    <span class="label-text-alt text-brand-text/60">
+      {# Which timezone is in use, and why: the system's, the server's, the task's, or one picked. #}
+      <span x-text="note" data-timezone-note>Timezone used: {% if current %}{{ current.display }}{% elif inherit_label %}the task's, {{ inherit_zone }}{% else %}the server's, {{ server_zone }}{% endif %}.</span>{% if help %} {{ help }}{% endif %}
+    </span>
+  </label>
+  {% if errors %}
+    <label class="label pt-1"><span class="label-text-alt text-error">{{ errors|join:" " }}</span></label>
+  {% endif %}
+</div>

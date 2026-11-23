@@ -1,8 +1,8 @@
 """Tests for the contributions ledger.
 
-Covers the closure wiring in ``tasks.services.close_task`` — who earns
-credit and who does not — the withdrawal on reopening, and the matrix and
-CSV helpers behind the contributions pages.
+Covers the verification wiring in ``tasks.services.verify_part`` — who
+earns credit and who does not — its withdrawal, and the matrix and CSV
+helpers behind the contributions pages.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from apps.contributions.forms import ContributionAddForm
 from apps.contributions.models import ContributionRecord
 from apps.contributions.services import (
     add_contribution,
+    sync_contribution_type,
     user_display_name,
     get_project_contributions_matrix,
     get_user_contributions,
@@ -24,6 +25,7 @@ from apps.core.enums import (
     ContributionType,
     MemberPrivileges,
     ProjectStatus,
+    TaskStatus,
 )
 from apps.projects.models import (
     ContributionTracking,
@@ -41,6 +43,10 @@ from apps.tasks.services import (
     mark_reviewed,
     reopen_own,
     reopen_task,
+    unverify_part,
+    verify_part,
+    verify_parts,
+    VerifyScope,
 )
 
 
@@ -88,85 +94,76 @@ def _member_for(project, user, privilege=MemberPrivileges.CONTRIBUTOR):
 
 
 # ---------------------------------------------------------------------------
-# Closing a task is the ledger event
+# A Lead verifying a part is the ledger event
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
-def test_closing_credits_an_assignee_who_marked_their_part_done(user):
-    project, col, pm_member = _make_project(user)
+def test_verifying_credits_the_member_whose_part_it_is(user, other_user):
+    project, col, lead = _make_project(user)
+    alice = _member_for(project, other_user)
     task = _make_task(
-        project, col, pm_member,
-        assignees=[pm_member],
-        ctype=ContributionType.DATA_CURATION,
+        project, col, lead, assignees=[alice], ctype=ContributionType.DATA_CURATION
     )
-    mark_own_done(task=task, member=pm_member)
-
+    log = mark_own_done(task=task, member=alice)
     assert ContributionRecord.objects.count() == 0
-    close_task(task=task, closed_by=pm_member)
 
-    record = ContributionRecord.objects.get(user=user)
+    verify_part(task_log=log, lead=lead)
+
+    record = ContributionRecord.objects.get(user=other_user)
     assert record.task_id == task.id
+    assert record.task_log_id == log.id
     assert record.project_id == project.id
     assert record.contribution_type == ContributionType.DATA_CURATION
     assert record.verified_by_id == user.id
-    assert record.closed_at is not None
+    log.refresh_from_db()
+    assert record.closed_at == log.verified_at
 
 
 @pytest.mark.django_db
-def test_closing_skips_an_assignee_who_never_marked_done(user, other_user):
-    project, col, pm_member = _make_project(user)
-    slacker = _member_for(project, other_user)
-    task = _make_task(project, col, pm_member, assignees=[pm_member, slacker])
-    mark_own_done(task=task, member=pm_member)
-
-    close_task(task=task, closed_by=pm_member)
-
-    assert set(ContributionRecord.objects.values_list("user_id", flat=True)) == {
-        user.id
-    }
-
-
-@pytest.mark.django_db
-def test_a_reviewed_task_credits_only_reviewed_submissions(user, other_user, pm_user):
-    """With reviewers on the task, a done mark alone is not enough."""
+def test_closing_a_task_writes_no_credit(user):
+    """Closing is the Lead's call about the task; credit waits on verifying."""
     project, col, lead = _make_project(user)
-    alice = _member_for(project, other_user)
-    bob = _member_for(project, pm_user)
-    task = _make_task(
-        project, col, lead, assignees=[alice, bob], reviewers=[lead]
-    )
-    alice_log = mark_own_done(task=task, member=alice)
-    mark_own_done(task=task, member=bob)
-    mark_reviewed(task_log=alice_log, reviewer=lead)
+    task = _make_task(project, col, lead, assignees=[lead])
+    mark_own_done(task=task, member=lead)
 
     close_task(task=task, closed_by=lead)
-
-    assert set(ContributionRecord.objects.values_list("user_id", flat=True)) == {
-        other_user.id
-    }
+    assert ContributionRecord.objects.count() == 0
 
 
 @pytest.mark.django_db
-def test_a_task_without_reviewers_needs_no_review(user):
-    project, col, pm_member = _make_project(user)
-    task = _make_task(project, col, pm_member, assignees=[pm_member])
-    log = mark_own_done(task=task, member=pm_member)
+def test_verifying_needs_no_review(user, other_user):
+    """A Lead may verify a part the reviewers have not reached."""
+    project, col, lead = _make_project(user)
+    alice = _member_for(project, other_user)
+    task = _make_task(project, col, lead, assignees=[alice], reviewers=[lead])
+    log = mark_own_done(task=task, member=alice)
     assert not log.is_reviewed
 
-    close_task(task=task, closed_by=pm_member)
-    assert ContributionRecord.objects.filter(user=user).exists()
+    verify_part(task_log=log, lead=lead)
+    assert ContributionRecord.objects.filter(user=other_user).exists()
 
 
 @pytest.mark.django_db
-def test_closing_credits_every_user_behind_a_team_assignee(user, other_user):
+def test_a_review_alone_writes_no_credit(user, other_user):
+    project, col, lead = _make_project(user)
+    alice = _member_for(project, other_user)
+    task = _make_task(project, col, lead, assignees=[alice], reviewers=[lead])
+    log = mark_own_done(task=task, member=alice)
+
+    mark_reviewed(task_log=log, reviewer=lead)
+    assert ContributionRecord.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_verifying_credits_every_user_behind_a_team_assignee(user, other_user):
     project, col, pm_member = _make_project(user)
     team = ProjectMember.objects.create(project=project, name="Team A")
     team.users.add(user, other_user)
     task = _make_task(project, col, pm_member, assignees=[team])
-    mark_own_done(task=task, member=team)
+    log = mark_own_done(task=task, member=team)
 
-    close_task(task=task, closed_by=pm_member)
+    verify_part(task_log=log, lead=pm_member)
 
     assert set(ContributionRecord.objects.values_list("user_id", flat=True)) == {
         user.id,
@@ -175,14 +172,14 @@ def test_closing_credits_every_user_behind_a_team_assignee(user, other_user):
 
 
 @pytest.mark.django_db
-def test_closing_twice_writes_one_record(user):
+def test_verifying_twice_writes_one_record(user):
     project, col, pm_member = _make_project(user)
     task = _make_task(project, col, pm_member, assignees=[pm_member])
-    mark_own_done(task=task, member=pm_member)
+    log = mark_own_done(task=task, member=pm_member)
 
-    close_task(task=task, closed_by=pm_member)
-    close_task(task=task, closed_by=pm_member)
-    close_task(task=task, closed_by=pm_member)
+    verify_part(task_log=log, lead=pm_member)
+    verify_part(task_log=log, lead=pm_member)
+    verify_parts(task=task, lead=pm_member, scope=VerifyScope.DONE)
 
     assert ContributionRecord.objects.filter(user=user).count() == 1
 
@@ -191,71 +188,190 @@ def test_closing_twice_writes_one_record(user):
 def test_a_project_not_tracking_credit_keeps_no_ledger(user):
     project, col, pm_member = _make_project(user, tracking=ContributionTracking.NONE)
     task = _make_task(project, col, pm_member, assignees=[pm_member])
-    mark_own_done(task=task, member=pm_member)
+    log = mark_own_done(task=task, member=pm_member)
 
-    close_task(task=task, closed_by=pm_member)
+    verify_part(task_log=log, lead=pm_member)
+    log.refresh_from_db()
+    assert log.is_verified  # the Lead's check still stands
     assert ContributionRecord.objects.count() == 0
 
 
 @pytest.mark.django_db
-def test_the_last_review_closes_the_task_and_credits_it(user, other_user):
-    """mark_reviewed closes a fully-reviewed task — the credit follows."""
+def test_verifying_on_a_closed_task_credits_the_member(user, other_user):
+    """A part marked after the Lead closed the task is still verified as usual."""
     project, col, lead = _make_project(user)
     alice = _member_for(project, other_user)
-    task = _make_task(project, col, lead, assignees=[alice], reviewers=[lead])
+    task = _make_task(project, col, lead, assignees=[alice])
+    close_task(task=task, closed_by=lead)
     log = mark_own_done(task=task, member=alice)
 
-    mark_reviewed(task_log=log, reviewer=lead)
-
+    verify_part(task_log=log, lead=lead)
     assert ContributionRecord.objects.filter(user=other_user).exists()
+    task.refresh_from_db()
+    assert task.status == TaskStatus.COMPLETED
 
 
 # ---------------------------------------------------------------------------
-# Reopening withdraws it again
+# Batch verification
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
-def test_reopening_withdraws_the_credit(user):
-    project, col, pm_member = _make_project(user)
-    task = _make_task(project, col, pm_member, assignees=[pm_member])
-    mark_own_done(task=task, member=pm_member)
-    close_task(task=task, closed_by=pm_member)
-    assert ContributionRecord.objects.count() == 1
-
-    reopen_task(task=task)
-    assert ContributionRecord.objects.count() == 0
-
-    # Closing again writes it back.
-    close_task(task=task, closed_by=pm_member)
-    assert ContributionRecord.objects.count() == 1
-
-
-@pytest.mark.django_db
-def test_undoing_a_done_mark_withdraws_the_credit(user, other_user):
-    """reopen_own reopens a task whose completion rested on its reviews."""
+def test_verifying_all_done_credits_every_part_marked_done(user, other_user, pm_user):
     project, col, lead = _make_project(user)
     alice = _member_for(project, other_user)
-    task = _make_task(project, col, lead, assignees=[alice], reviewers=[lead])
+    bob = _member_for(project, pm_user)
+    task = _make_task(project, col, lead, assignees=[alice, bob, lead])
+    mark_own_done(task=task, member=alice)
+    mark_own_done(task=task, member=bob)  # the Lead's own part is not done
+
+    verified = verify_parts(task=task, lead=lead, scope=VerifyScope.DONE)
+
+    assert {log.assigned_to_id for log in verified} == {alice.pk, bob.pk}
+    assert set(ContributionRecord.objects.values_list("user_id", flat=True)) == {
+        other_user.id,
+        pm_user.id,
+    }
+
+
+@pytest.mark.django_db
+def test_verifying_all_reviewed_skips_parts_not_reviewed(user, other_user, pm_user):
+    project, col, lead = _make_project(user)
+    alice = _member_for(project, other_user)
+    bob = _member_for(project, pm_user)
+    task = _make_task(project, col, lead, assignees=[alice, bob], reviewers=[lead])
+    alice_log = mark_own_done(task=task, member=alice)
+    mark_own_done(task=task, member=bob)
+    mark_reviewed(task_log=alice_log, reviewer=lead)
+
+    verified = verify_parts(task=task, lead=lead, scope=VerifyScope.REVIEWED)
+
+    assert [log.pk for log in verified] == [alice_log.pk]
+    assert set(ContributionRecord.objects.values_list("user_id", flat=True)) == {
+        other_user.id
+    }
+
+
+@pytest.mark.django_db
+def test_a_batch_writes_an_audit_row_per_part_naming_the_batch(user, other_user, pm_user):
+    project, col, lead = _make_project(user)
+    alice = _member_for(project, other_user)
+    bob = _member_for(project, pm_user)
+    task = _make_task(project, col, lead, assignees=[alice, bob])
+    mark_own_done(task=task, member=alice)
+    mark_own_done(task=task, member=bob)
+
+    verify_parts(task=task, lead=lead, scope=VerifyScope.DONE)
+
+    rows = AuditLog.objects.filter(action=AuditAction.TASK_PART_VERIFIED)
+    assert rows.count() == 2
+    assert {row.metadata["assignee_member_id"] for row in rows} == {alice.pk, bob.pk}
+    assert all(row.metadata["batch"] == "done" for row in rows)
+    assert all(row.actor_id == user.pk for row in rows)
+
+
+@pytest.mark.django_db
+def test_an_unknown_batch_scope_is_refused(user):
+    project, col, lead = _make_project(user)
+    task = _make_task(project, col, lead, assignees=[lead])
+    with pytest.raises(ValueError):
+        verify_parts(task=task, lead=lead, scope="everything")
+
+
+# ---------------------------------------------------------------------------
+# Taking the verification back takes the credit with it
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_withdrawing_a_verification_withdraws_the_credit(user, other_user):
+    project, col, lead = _make_project(user)
+    alice = _member_for(project, other_user)
+    task = _make_task(project, col, lead, assignees=[alice])
     log = mark_own_done(task=task, member=alice)
-    mark_reviewed(task_log=log, reviewer=lead)
+    verify_part(task_log=log, lead=lead)
     assert ContributionRecord.objects.count() == 1
+
+    unverify_part(task_log=log, actor=lead)
+
+    assert ContributionRecord.objects.count() == 0
+    log.refresh_from_db()
+    assert not log.is_verified and log.verified_by_id is None
+    assert AuditLog.objects.filter(action=AuditAction.TASK_PART_UNVERIFIED).count() == 1
+
+
+@pytest.mark.django_db
+def test_undoing_a_done_mark_clears_the_verification_and_its_credit(user, other_user):
+    project, col, lead = _make_project(user)
+    alice = _member_for(project, other_user)
+    task = _make_task(project, col, lead, assignees=[alice])
+    log = mark_own_done(task=task, member=alice)
+    verify_part(task_log=log, lead=lead)
 
     reopen_own(task=task, member=alice)
+
+    assert ContributionRecord.objects.count() == 0
+    log.refresh_from_db()
+    assert not log.is_verified
+    row = AuditLog.objects.get(action=AuditAction.TASK_PART_UNVERIFIED)
+    assert row.metadata["reason"] == "the done mark it stood on was reverted"
+
+    # Marking done again brings the part back unverified.
+    log = mark_own_done(task=task, member=alice)
+    assert not log.is_verified
     assert ContributionRecord.objects.count() == 0
 
 
 @pytest.mark.django_db
-def test_withdrawing_a_review_withdraws_the_credit(user, other_user):
+def test_withdrawing_a_review_leaves_the_verification(user, other_user):
     project, col, lead = _make_project(user)
     alice = _member_for(project, other_user)
     task = _make_task(project, col, lead, assignees=[alice], reviewers=[lead])
     log = mark_own_done(task=task, member=alice)
     mark_reviewed(task_log=log, reviewer=lead)
-    assert ContributionRecord.objects.count() == 1
+    verify_part(task_log=log, lead=lead)
 
     clear_review(task_log=log, cleared_by=lead)
-    assert ContributionRecord.objects.count() == 0
+
+    log.refresh_from_db()
+    assert log.is_verified
+    assert ContributionRecord.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_reopening_a_task_keeps_the_credit(user):
+    """Credit stands on the verification, not on the task's status."""
+    project, col, pm_member = _make_project(user)
+    task = _make_task(project, col, pm_member, assignees=[pm_member])
+    log = mark_own_done(task=task, member=pm_member)
+    verify_part(task_log=log, lead=pm_member)
+    close_task(task=task, closed_by=pm_member)
+
+    reopen_task(task=task)
+    assert ContributionRecord.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_changing_the_tasks_type_moves_its_credit_but_not_a_correction(user, other_user, pm_user):
+    project, col, lead = _make_project(user)
+    alice = _member_for(project, other_user)
+    bob = _member_for(project, pm_user)
+    task = _make_task(project, col, lead, assignees=[alice, bob])
+    for member in (alice, bob):
+        verify_part(task_log=mark_own_done(task=task, member=member), lead=lead)
+    corrected = ContributionRecord.objects.get(user=pm_user)
+    corrected.contribution_type = ContributionType.SOFTWARE
+    corrected.save(update_fields=["contribution_type"])
+
+    task.contribution_type = ContributionType.DATA_CURATION
+    task.save(update_fields=["contribution_type"])
+    sync_contribution_type(task, old_type=ContributionType.OTHER)
+
+    assert ContributionRecord.objects.get(user=other_user).contribution_type == (
+        ContributionType.DATA_CURATION
+    )
+    corrected.refresh_from_db()
+    assert corrected.contribution_type == ContributionType.SOFTWARE
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +384,6 @@ def test_approving_a_submission_writes_no_contribution(user):
     project, col, pm_member = _make_project(user)
     task = _make_task(project, col, pm_member, assignees=[pm_member])
     log = complete_task(task=task, completed_by=pm_member)
-    ContributionRecord.objects.all().delete()
 
     approve_completion(task_log=log, approved=True, verifier_user=user)
     assert ContributionRecord.objects.count() == 0
@@ -283,8 +398,7 @@ def test_approving_a_submission_writes_no_contribution(user):
 def test_deleting_a_task_takes_its_contributions_with_it(user):
     project, col, pm_member = _make_project(user)
     task = _make_task(project, col, pm_member, assignees=[pm_member])
-    mark_own_done(task=task, member=pm_member)
-    close_task(task=task, closed_by=pm_member)
+    verify_part(task_log=mark_own_done(task=task, member=pm_member), lead=pm_member)
     assert ContributionRecord.objects.count() == 1
 
     task.delete()
@@ -295,8 +409,7 @@ def test_deleting_a_task_takes_its_contributions_with_it(user):
 def test_deleting_a_project_takes_its_contributions_with_it(user):
     project, col, pm_member = _make_project(user)
     task = _make_task(project, col, pm_member, assignees=[pm_member])
-    mark_own_done(task=task, member=pm_member)
-    close_task(task=task, closed_by=pm_member)
+    verify_part(task_log=mark_own_done(task=task, member=pm_member), lead=pm_member)
 
     project.delete()
     assert ContributionRecord.objects.count() == 0
@@ -308,10 +421,10 @@ def test_deleting_a_project_takes_its_contributions_with_it(user):
 
 
 def _credit(project, col, pm_member, member, ctype):
-    """Close a one-assignee task so ``member`` earns one ``ctype`` record."""
+    """Verify a one-assignee task's part so ``member`` earns one ``ctype``
+    record."""
     task = _make_task(project, col, pm_member, assignees=[member], ctype=ctype)
-    mark_own_done(task=task, member=member)
-    close_task(task=task, closed_by=pm_member)
+    verify_part(task_log=mark_own_done(task=task, member=member), lead=pm_member)
     return task
 
 
@@ -768,7 +881,7 @@ def test_adding_credit_someone_already_holds_corrects_it(client, user):
 
 
 @pytest.mark.django_db
-def test_a_hand_entered_record_survives_the_task_reopening(client, user, other_user):
+def test_a_hand_entered_record_survives_the_verification_being_withdrawn(client, user, other_user):
     project, col, pm = _make_project(user)
     _member_for(project, other_user)
     task = _credit(project, col, pm, pm, ContributionType.SOFTWARE)
@@ -784,14 +897,14 @@ def test_a_hand_entered_record_survives_the_task_reopening(client, user, other_u
     )
     assert ContributionRecord.objects.count() == 2
 
-    reopen_task(task=task)
+    unverify_part(task_log=task.task_logs.get(assigned_to=pm), actor=pm)
 
-    # The earned one goes with the task's state; the entered one stands.
+    # The earned one goes with the verification; the entered one stands.
     assert [r.user_id for r in ContributionRecord.objects.all()] == [other_user.id]
 
 
 @pytest.mark.django_db
-def test_a_correction_is_not_overwritten_when_the_task_closes_again(client, user):
+def test_a_correction_is_not_overwritten_when_the_part_is_verified_again(client, user):
     project, col, pm = _make_project(user)
     task = _credit(project, col, pm, pm, ContributionType.OTHER)
     record = ContributionRecord.objects.get()
@@ -802,6 +915,7 @@ def test_a_correction_is_not_overwritten_when_the_task_closes_again(client, user
         {"contribution_type": ContributionType.SOFTWARE},
     )
     close_task(task=task, closed_by=pm)
+    verify_parts(task=task, lead=pm, scope=VerifyScope.DONE)
 
     record.refresh_from_db()
     assert record.contribution_type == ContributionType.SOFTWARE
@@ -1285,51 +1399,37 @@ def test_the_headers_carry_the_sort_controls(client, user, sortable_project):
 
 
 # ---------------------------------------------------------------------------
-# Who closed the task the credit was earned on
+# Who verified the part the credit was earned on
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
-def test_the_project_list_names_who_closed_the_task(client, user, other_user):
+def test_the_project_list_names_who_verified_the_part(client, user, other_user):
     project, col, lead = _make_project(user)
     alice = _member_for(project, other_user)
     task = _make_task(project, col, lead, assignees=[alice])
-    mark_own_done(task=task, member=alice)
-    close_task(task=task, closed_by=lead)
+    verify_part(task_log=mark_own_done(task=task, member=alice), lead=lead)
 
     client.force_login(user)
     body = client.get(_every_url(project)).content.decode()
-    assert "Closed by" in body
-    # The lead who closed it, not the member who earned the credit.
+    assert "Verified by" in body
+    # The lead who verified it, not the member who earned the credit.
     assert ContributionRecord.objects.get().verified_by_id == user.pk
     assert "Alice" in body
 
 
 @pytest.mark.django_db
-def test_the_contributions_module_names_who_closed_the_task(client, user, other_user):
+def test_the_contributions_module_names_who_verified_the_part(client, user, other_user):
     """Your own credit says who credited you."""
     project, col, lead = _make_project(user)
     alice = _member_for(project, other_user)
     task = _make_task(project, col, lead, assignees=[alice])
-    mark_own_done(task=task, member=alice)
-    close_task(task=task, closed_by=lead)
+    verify_part(task_log=mark_own_done(task=task, member=alice), lead=lead)
 
     client.force_login(other_user)
     body = client.get(reverse("contributions:contributions")).content.decode()
-    assert "Closed by" in body
+    assert "Verified by" in body
     assert "Alice" in body  # the lead, on Bob's own page
-
-
-@pytest.mark.django_db
-def test_a_reviewers_final_signoff_is_recorded_as_the_closer(client, user, other_user):
-    """The last review closes the task, so the reviewer is who closed it."""
-    project, col, lead = _make_project(user)
-    alice = _member_for(project, other_user)
-    task = _make_task(project, col, lead, assignees=[alice], reviewers=[lead])
-    log = mark_own_done(task=task, member=alice)
-    mark_reviewed(task_log=log, reviewer=lead)
-
-    assert ContributionRecord.objects.get().verified_by_id == user.pk
 
 
 @pytest.mark.django_db
@@ -1352,13 +1452,12 @@ def test_a_hand_entered_record_names_who_entered_it(client, user, other_user):
 
 
 @pytest.mark.django_db
-def test_a_closer_whose_account_is_gone_is_still_reported(client, user, other_user):
+def test_a_verifier_whose_account_is_gone_is_still_reported(client, user, other_user):
     """SET_NULL outlives the account; say so rather than leaving it blank."""
     project, col, lead = _make_project(user)
     alice = _member_for(project, other_user)
     task = _make_task(project, col, lead, assignees=[alice])
-    mark_own_done(task=task, member=alice)
-    close_task(task=task, closed_by=lead)
+    verify_part(task_log=mark_own_done(task=task, member=alice), lead=lead)
 
     record = ContributionRecord.objects.get()
     record.verified_by = None
@@ -1370,18 +1469,17 @@ def test_a_closer_whose_account_is_gone_is_still_reported(client, user, other_us
 
 
 @pytest.mark.django_db
-def test_the_public_profile_names_the_closer(client, user, other_user):
+def test_the_public_profile_names_the_verifier(client, user, other_user):
     project, col, lead = _make_project(user)
     alice = _member_for(project, other_user)
     task = _make_task(project, col, lead, assignees=[alice])
-    mark_own_done(task=task, member=alice)
-    close_task(task=task, closed_by=lead)
+    verify_part(task_log=mark_own_done(task=task, member=alice), lead=lead)
 
     client.force_login(other_user)
     body = client.get(
         reverse("public_profile", kwargs={"pk": other_user.pk})
     ).content.decode()
-    assert "closed by Alice" in body
+    assert "verified by Alice" in body
 
 
 # ---------------------------------------------------------------------------
@@ -1432,6 +1530,19 @@ def test_contributions_module_shows_the_profile_card(client, user):
     assert tiles["Data curation"] == 1
     assert tiles["Investigation"] == 0
     assert context["contribution_total"] == 3
+    # The legacy Writing type is not a role anyone can earn any more.
+    assert "Writing (legacy)" not in tiles
+
+
+@pytest.mark.django_db
+def test_contributions_module_card_keeps_legacy_writing_when_earned(client, user):
+    project, col, pm = _make_project(user, name="Alpha")
+    _credit(project, col, pm, pm, ContributionType.WRITING)
+
+    client.force_login(user)
+    context = client.get(reverse("contributions:contributions")).context
+    tiles = dict(context["contribution_tiles"])
+    assert tiles["Writing (legacy)"] == 1
 
 
 @pytest.mark.django_db
@@ -1513,7 +1624,7 @@ def test_the_add_modal_links_the_credit_roles_from_the_label_line(client, user):
 
 @pytest.mark.django_db
 def test_every_contribution_sorts_by_every_header_but_actions(client, user):
-    """Member, Task, Role, Completed and Closed by are sort buttons; Actions
+    """Member, Task, Role, Verified and Verified by are sort buttons; Actions
     is not; each row carries what it sorts by."""
     project, col, pm = _make_project(user)
     task = _credit(project, col, pm, pm, ContributionType.SOFTWARE)
@@ -1566,3 +1677,42 @@ def test_withdrawing_asks_first_in_a_remove_style_modal(client, user):
 
     client.post(_remove_url(project, record), headers={"hx-request": "true"})
     assert not ContributionRecord.objects.exists()
+
+
+# ---------------------------------------------------------------------------
+# Credit written before verification existed reads as verified
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_the_backfill_marks_credited_parts_verified(user, other_user):
+    import importlib
+
+    from django.apps import apps as django_apps
+    from django.utils import timezone
+
+    backfill = importlib.import_module(
+        "apps.tasks.migrations.0016_tasklog_verified"
+    ).backfill_from_the_ledger
+
+    project, col, lead = _make_project(user)
+    alice = _member_for(project, other_user)
+    task = _make_task(project, col, lead, assignees=[alice, lead])
+    credited = mark_own_done(task=task, member=alice)
+    uncredited = mark_own_done(task=task, member=lead)
+    when = timezone.now() - timezone.timedelta(days=3)
+    # The shape the old close-time writer left: a record, no verification.
+    ContributionRecord.objects.create(
+        task=task, task_log=credited, user=other_user, project=project,
+        contribution_type=task.contribution_type, verified_by=user, closed_at=when,
+    )
+    add_contribution(
+        task=task, user=user, contribution_type=ContributionType.SOFTWARE, actor=user
+    )
+
+    backfill(django_apps, None)
+
+    credited.refresh_from_db()
+    uncredited.refresh_from_db()
+    assert credited.verified_at == when and credited.verified_by_id == lead.pk
+    assert not uncredited.is_verified  # a hand-entered record verifies nothing

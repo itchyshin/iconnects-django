@@ -31,7 +31,7 @@ from apps.projects.models import (
 )
 from apps.projects.services import create_project_with_owner
 from apps.tasks.models import KanbanBoard, Task
-from apps.tasks.services import close_task, mark_own_done
+from apps.tasks.services import close_task, mark_own_done, verify_part
 
 User = get_user_model()
 
@@ -169,12 +169,14 @@ class Command(BaseCommand):
                 # Leave open — will show up under "My active tasks" for the assignee.
                 continue
 
-            mark_own_done(task=task, member=assignee_member)
+            log = mark_own_done(task=task, member=assignee_member)
             if closed:
-                # Closing is the ledger event: this is what writes the credit.
+                # Verifying is the ledger event: this is what writes the
+                # credit. Closing only marks the task completed.
+                verify_part(task_log=log, lead=alice_member)
                 close_task(task=task, closed_by=alice_member)
             # closed=False means we stop after the assignee's own mark —
-            # done, but still waiting on the lead to close it.
+            # done, but still waiting on the lead to verify it and close it.
 
             self.stdout.write(f"  + task '{name}' ({assignee_email}, {ctype})")
 

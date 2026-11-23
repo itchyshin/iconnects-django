@@ -3,10 +3,20 @@
   Context comes from views._task_status_context: task, is_project_manager,
   assignee_states (each with member, log, done, done_at, done_by,
   done_by_self, reviewed, reviewed_by, reviewed_at, awaiting_review,
-  can_mark_done, can_review, can_unreview),
-  done_count, reviewed_count, assignee_count, is_assignee, my_done,
+  verified, verified_by, verified_at, awaiting_verification,
+  can_mark_done, can_review, can_unreview, can_verify, can_unverify,
+  individual, own_start, own_deadline, start_date, deadline, start_tz,
+  deadline_tz, own_timezone, start_differs, deadline_differs, zone_differs,
+  zone_short, dates_differ, type_differs, overdue,
+  can_set_dates, own_start_input, own_deadline_input, tracks_credit,
+  own_type, contribution_type, contribution_type_label, can_set_type),
+  pending_dates_count, can_set_dates, can_set_type, own_type_count,
+  contribution_type_choices,
+  done_count, reviewed_count, verified_count, verify_done_count,
+  verify_reviewed_count, assignee_count, is_assignee, my_done,
   marks_locked, needs_review, show_review, reviewers.
 {% endcomment %}
+{% load task_tags %}
 <div id="task-status-block"
      {% if pane_mode %}
        hx-get="{% url 'tasks:status_block' pk=task.pk %}?pane=1"
@@ -26,8 +36,8 @@
       {% if pane_mode %}
       <h3 class="text-xs uppercase tracking-wider text-brand-text/70 font-semibold">Completion</h3>
       {% comment %}
-        The (i) beside the heading: how a part goes from done to reviewed,
-        and how the task is completed, which locks its records. It sits
+        The (i) beside the heading: how a part goes from done to reviewed to
+        verified, and how the task is completed. It sits
         inside the swap target, so a mark or review closes it again, which
         is fine for a note opened to read.
       {% endcomment %}
@@ -58,7 +68,8 @@
           <ol class="mt-2 flex flex-col gap-2">
             <li><span class="font-semibold text-success">1. Done.</span> Each assignee ticks Done when their part is finished; a Lead can tick it for anyone. Untick to undo.</li>
             <li><span class="font-semibold text-violet-600">2. Reviewed.</span> On a task with reviewers, a reviewer or a Lead ticks Reviewed once a part is done. Whoever reviewed it, or a Lead, can untick it. Undoing a Done mark clears its review.</li>
-            <li><span class="font-semibold text-brand-navy">3. Completed.</span> A Lead marks the whole task completed with Mark completed at the top. A task with reviewers also completes by itself once every part is reviewed. Once completed, its Done and Reviewed records are locked for everyone; a Lead marks it not complete to change them.</li>
+            <li><span class="font-semibold text-sky-700">3. Verified.</span> A Lead ticks Verified to confirm a member's contribution.{% if task.project.tracks_credit %} On this CRediT project, that is what credits them: it records their contribution under the task's CRediT role ({{ task.get_contribution_type_display }}) on Contribution Tracking — or under a member's own role, where a Lead gave them one — and nothing is credited until then.{% else %} This project doesn't track CRediT, so it records the sign-off only.{% endif %} Leads can verify one part at a time, or use Verify all marked done or Verify all marked reviewed. Undoing a Done mark clears its verification.</li>
+            <li><span class="font-semibold text-brand-navy">4. Completed.</span> A Lead marks the whole task completed with Mark completed at the top. Assignees can still tick their own Done and Leads can still verify after that, and reviewers can review parts marked done after completion. Parts already marked when the task was completed stay as they were: a review given then is locked, and a part left unreviewed can no longer be reviewed. The Done marks a Lead sets for others are locked too; a Lead marks the task not complete to change any of these. A review given after completion can still be unticked, and an assignee can still untick their own Done, which clears its review and verification.</li>
           </ol>
           </div>
         </div>
@@ -82,7 +93,7 @@
       refreshed out of band at the bottom of this template. Only the plain
       layout keeps a self-mark button of its own here.
     {% endcomment %}
-    {% if not pane_mode and task.status != "COMPLETED" and is_assignee %}
+    {% if not pane_mode and is_assignee %}
       <div class="flex items-center gap-2">
         {% if my_done %}
           <button class="btn btn-ghost btn-sm"
@@ -107,8 +118,9 @@
   {% if pane_mode %}
     {% if assignee_states %}
       {% comment %}
-        How far along, one labelled bar per stage: Marked done (green) and,
-        on a task under review, Reviewed (violet), each with its count. The
+        How far along, one labelled bar per stage: Marked done (green), on a
+        task under review Reviewed (violet), and Verified (sky), each with its
+        count. The
         heading carries the overall figure — parts both marked done and
         reviewed — so a task without review shows the one bar and no
         repeat of it.
@@ -126,11 +138,60 @@
           </span>
           <span class="text-right text-brand-text/80">{{ reviewed_count }} of {{ assignee_count }}</span>
         {% endif %}
+        <span class="text-brand-text/80 font-medium">Verified</span>
+        <span class="h-1.5 rounded-full bg-brand-lighter overflow-hidden" aria-hidden="true">
+          <span class="block h-full rounded-full bg-sky-700" style="width: {% widthratio verified_count assignee_count 100 %}%"></span>
+        </span>
+        <span class="text-right text-brand-text/80">{{ verified_count }} of {{ assignee_count }}</span>
       </div>
 
       {% comment %}
-        One table row per assignee, under Assignee / Done / Reviewed (the
-        last only on a task under review), one line each. The Assignee cell
+        The Lead's batch verification, under the progress bars: Verify all
+        marked done, and (on a task under review) Verify all marked reviewed.
+        Each says how many parts it would verify and switches off at none;
+        a click opens its confirmation modal (task_verify_batch_modal.html),
+        which names the members and posts the batch. Parts already verified
+        are skipped, so it is safe to repeat. Open whether or not the task is
+        completed, like verifying one part.
+      {% endcomment %}
+      {% if is_project_manager %}
+        <div class="mt-3 flex flex-wrap items-center gap-2" data-verify-batch>
+          {% comment %}
+            Every assignee not yet done gets the same own start date and/or
+            deadline — earlier or later than the task's. Opens the dates
+            dialog at the end of this block (task_dates_modal.html).
+          {% endcomment %}
+          {% if can_set_dates %}
+            <button type="button" class="btn btn-xs btn-outline"
+                    @click="$dispatch('open-dates', { scope: 'pending', member: '', name: '', start: '', value: '', reason: '', hasPersonal: false, timezone: null })"
+                    aria-haspopup="dialog"
+                    {% if not pending_dates_count %}disabled{% endif %}
+                    data-dates-all>Set dates for all not done ({{ pending_dates_count }})</button>
+          {% endif %}
+          <button type="button" class="btn btn-xs btn-outline"
+                  onclick="document.getElementById('verify-done-modal-{{ task.pk }}').showModal()"
+                  aria-haspopup="dialog"
+                  {% if not verify_done_count %}disabled{% endif %}
+                  data-verify-scope="done">Verify all marked done ({{ verify_done_count }})</button>
+          {% if show_review %}
+            <button type="button" class="btn btn-xs btn-outline"
+                    onclick="document.getElementById('verify-reviewed-modal-{{ task.pk }}').showModal()"
+                    aria-haspopup="dialog"
+                    {% if not verify_reviewed_count %}disabled{% endif %}
+                    data-verify-scope="reviewed">Verify all marked reviewed ({{ verify_reviewed_count }})</button>
+          {% endif %}
+        </div>
+        {% if verify_done_count %}
+          {% include "tasks/partials/task_verify_batch_modal.html" with scope="done" count=verify_done_count task=task assignee_states=assignee_states %}
+        {% endif %}
+        {% if show_review and verify_reviewed_count %}
+          {% include "tasks/partials/task_verify_batch_modal.html" with scope="reviewed" count=verify_reviewed_count task=task assignee_states=assignee_states %}
+        {% endif %}
+      {% endif %}
+
+      {% comment %}
+        One table row per assignee, under Assignee / Done / Reviewed (only on
+        a task under review) / Verified, one line each. The Assignee cell
         names them. The Done and Reviewed cells each hold a tick box and,
         beside it, when and by whom ("Oct 14 · by …"), in plain text — the
         round boxes carry the colour, green for Done and purple for Reviewed;
@@ -139,7 +200,8 @@
         whoever may make that change (task_done_tick.html,
         task_review_tick.html), and read-only for everyone else. Each tick
         cell carries its state as
-        ``data-mark`` (yes / no for Done; yes / pending / none for Reviewed).
+        ``data-mark`` (yes / no for Done; yes / pending / none for Reviewed
+        and Verified).
         Rows come from the task's current
         assignees, so the table follows people being added to or taken off
         the task without any extra bookkeeping.
@@ -171,17 +233,21 @@
         page render.
       {% endcomment %}
       <style>
-        .completion-table { table-layout: fixed; }
+        /* Four columns need room: below this the card scrolls sideways
+           (its wrapper is overflow-x-auto) rather than breaking every note
+           a letter per line on a phone. */
+        .completion-table { table-layout: fixed; min-width: 34rem; }
         .completion-table th, .completion-table td { vertical-align: middle; }
         .completion-table:not(.rows-expanded) tbody tr:nth-child(n+4) { display: none; }
-        .completion-table col.completion-name-col { width: 34%; }
-        .completion-table.no-review col.completion-name-col { width: 45%; }
+        .completion-table col.completion-name-col { width: 28%; }
+        .completion-table.no-review col.completion-name-col { width: 34%; }
         .completion-mark { display: flex; align-items: center; gap: 0.625rem; min-width: 0; }
         .completion-mark-note { font-size: 0.8125rem; line-height: 1.25; min-width: 0; overflow-wrap: anywhere; }
         .completion-tick { appearance: none; -webkit-appearance: none; margin: 0; width: 22px; height: 22px; border-radius: 999px; border: 2px solid #9aa3c7; background: #fff; position: relative; cursor: pointer; vertical-align: middle; flex-shrink: 0; }
         .completion-tick:checked::after { content: ""; position: absolute; left: 6px; top: 2px; width: 6px; height: 11px; border: solid #fff; border-width: 0 2.5px 2.5px 0; transform: rotate(45deg); }
         .completion-tick-done:checked { background: #16a34a; border-color: #16a34a; }
         .completion-tick-review:checked { background: #7c3aed; border-color: #7c3aed; }
+        .completion-tick-verify:checked { background: #0369a1; border-color: #0369a1; }
         .completion-tick:disabled { cursor: default; }
         .completion-tick:disabled:not(:checked) { opacity: 0.45; }
         .completion-tick[aria-disabled="true"] { cursor: not-allowed; }
@@ -199,7 +265,7 @@
                },
                sortRows() {
                  const body = this.$refs.rows
-                 const field = { name: 'sortName', done: 'sortDone', reviewed: 'sortReviewed' }[sortKey]
+                 const field = { name: 'sortName', done: 'sortDone', reviewed: 'sortReviewed', verified: 'sortVerified' }[sortKey]
                  const dir = sortDesc ? -1 : 1
                  const rows = [...body.rows].sort((a, b) => {
                    if (field) {
@@ -218,6 +284,7 @@
           <col class="completion-name-col">
           <col>
           {% if show_review %}<col>{% endif %}
+          <col>
         </colgroup>
         <thead class="bg-brand-lighter text-brand-navy">
           <tr>
@@ -250,6 +317,15 @@
               </button>
             </th>
             {% endif %}
+            <th scope="col" :aria-sort="ariaSort('verified')">
+              <button type="button" class="inline-flex items-center gap-1 font-semibold hover:text-brand-coral transition-colors" @click="sortBy('verified')">
+                Verified
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-3.5 h-3.5 shrink-0" aria-hidden="true"
+                     x-cloak x-show="sortKey === 'verified'" :class="{ 'rotate-180': sortDesc }">
+                  <path fill-rule="evenodd" d="M10 17a.75.75 0 0 1-.75-.75V5.612L5.29 9.77a.75.75 0 0 1-1.08-1.04l5.25-5.5a.75.75 0 0 1 1.08 0l5.25 5.5a.75.75 0 1 1-1.08 1.04l-3.96-4.158V16.25A.75.75 0 0 1 10 17Z" clip-rule="evenodd" />
+                </svg>
+              </button>
+            </th>
           </tr>
         </thead>
         <tbody x-ref="rows">
@@ -263,13 +339,68 @@
                 data-order="{{ forloop.counter0 }}"
                 data-sort-name="{{ s.member.display_name|lower }}"
                 data-sort-done="{% if s.done %}{% if s.done_at %}{{ s.done_at|date:'U' }}{% else %}0{% endif %}{% else %}100000000000{% endif %}"
-                data-sort-reviewed="{% if s.reviewed %}{% if s.reviewed_at %}{{ s.reviewed_at|date:'U' }}{% else %}0{% endif %}{% elif s.done %}100000000000{% else %}200000000000{% endif %}">
+                data-sort-reviewed="{% if s.reviewed %}{% if s.reviewed_at %}{{ s.reviewed_at|date:'U' }}{% else %}0{% endif %}{% elif s.done %}100000000000{% else %}200000000000{% endif %}"
+                data-sort-verified="{% if s.verified %}{% if s.verified_at %}{{ s.verified_at|date:'U' }}{% else %}0{% endif %}{% elif s.done %}100000000000{% else %}200000000000{% endif %}">
               <td>
                 <div class="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0">
                   <span class="w-6 h-6 rounded-full bg-brand-navy/80 text-white text-[11px] font-semibold inline-flex items-center justify-center shrink-0" aria-hidden="true">{{ s.member.display_name|slice:":1"|upper }}</span>
                   <span class="text-sm font-medium text-brand-navy break-words min-w-0" data-assignee-name>{{ s.member.display_name }}</span>
                   {% if s.is_viewer %}<span class="text-xs text-brand-text/60 shrink-0">(you)</span>{% endif %}
                 </div>
+                {% comment %}
+                  Under the member's name, only what differs from the task:
+                  their own start date and/or deadline when at another
+                  moment than the task's, and their own timezone when
+                  another than the task's ("Tokyo (UTC+9)"), on one line;
+                  their own contribution type when another than the task's.
+                  A member who follows the task shows nothing here. The dates
+                  line turns red, with an Overdue pill, once their deadline
+                  (own or the task's) has passed and their part is not done;
+                  the pill shows even when the date itself is the task's. The
+                  tooltip names who set the dates, the task's dates and the
+                  reason. A Lead gets Set dates / Change dates and Set type /
+                  Change type on a line of their own, which open the dates
+                  dialog and the type dialog (task_member_type_modal.html).
+                {% endcomment %}
+                {% if s.dates_differ or s.overdue or s.tracks_credit and s.type_differs or s.can_set_dates or s.can_set_type %}
+                  <div class="mt-1 flex flex-col gap-0.5 text-xs"
+                       data-member-deadline="{% if s.own_deadline %}own{% elif s.deadline %}task{% else %}none{% endif %}"
+                       data-member-start="{% if s.own_start %}own{% elif s.start_date %}task{% else %}none{% endif %}"
+                       {% if s.tracks_credit %}data-member-type="{% if s.own_type %}own{% else %}task{% endif %}"
+                       data-member-type-value="{{ s.contribution_type }}"{% endif %}>
+                    {% if s.dates_differ or s.overdue %}
+                      <div class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5" data-member-dates>
+                        {% if s.dates_differ %}
+                          <span class="{% if s.overdue %}text-error font-medium{% else %}text-brand-text/70{% endif %}"
+                                title="Individual dates{% if s.individual.set_by %} set by {{ s.individual.set_by.display_name }}{% endif %}{% if task.start_date or task.deadline %} (task: {% if task.start_date %}starts {{ task.start_date|in_zone:task.timezone|date:"M j, Y g:i A T" }}{% if task.deadline %}, {% endif %}{% endif %}{% if task.deadline %}due {{ task.deadline|in_zone:task.timezone|date:"M j, Y g:i A T" }}{% endif %}){% endif %}{% if s.individual.reason %}: {{ s.individual.reason }}{% endif %}">{% if s.start_differs %}Starts {{ s.own_start|in_zone:s.start_tz|date:"M j" }}{% endif %}{% if s.start_differs and s.deadline_differs %} &middot; {% endif %}{% if s.deadline_differs %}Due {{ s.own_deadline|in_zone:s.deadline_tz|date:"M j" }}{% endif %}{% if s.zone_differs %}{% if s.start_differs or s.deadline_differs %} &middot; {% endif %}<span data-member-timezone>{{ s.zone_short }}</span>{% endif %}</span>
+                        {% endif %}
+                        {% if s.overdue %}
+                          <span class="inline-flex items-center rounded px-1 py-0.5 bg-error/10 text-error text-[10px] font-semibold leading-none" data-member-overdue>Overdue</span>
+                        {% endif %}
+                      </div>
+                    {% endif %}
+                    {% if s.tracks_credit and s.type_differs %}
+                      <div class="text-brand-text/70" data-member-type-line
+                           title="Individual contribution type{% if s.own_type.set_by %} set by {{ s.own_type.set_by.display_name }}{% endif %} (task: {{ task.get_contribution_type_display }})">Task type: {{ s.contribution_type_label }}</div>
+                    {% endif %}
+                    {% if s.can_set_dates or s.can_set_type %}
+                      <div class="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                        {% if s.can_set_dates %}
+                      <button type="button" class="text-brand-navy font-medium hover:underline"
+                              @click="$dispatch('open-dates', { scope: 'member', member: '{{ s.member.pk }}', name: '{{ s.member.display_name|escapejs }}', start: '{{ s.own_start_input }}', value: '{{ s.own_deadline_input }}', reason: '{{ s.individual.reason|default:''|escapejs }}', hasPersonal: {% if s.individual %}true{% else %}false{% endif %}, timezone: {% if s.own_timezone is None %}null{% else %}'{{ s.own_timezone|escapejs }}'{% endif %} })"
+                              aria-haspopup="dialog"
+                              data-set-dates="{{ s.member.pk }}">{% if s.individual %}Change dates<span class="sr-only"> for {{ s.member.display_name }}</span>{% else %}Set dates<span class="sr-only"> for {{ s.member.display_name }}</span>{% endif %}</button>
+                        {% endif %}
+                        {% if s.can_set_type %}
+                      <button type="button" class="text-brand-navy font-medium hover:underline"
+                              @click="$dispatch('open-member-type', { member: '{{ s.member.pk }}', name: '{{ s.member.display_name|escapejs }}', value: '{% if s.own_type %}{{ s.own_type.contribution_type }}{% endif %}', hasOwn: {% if s.own_type %}true{% else %}false{% endif %} })"
+                              aria-haspopup="dialog"
+                              data-set-type="{{ s.member.pk }}">{% if s.own_type %}Change type<span class="sr-only"> for {{ s.member.display_name }}</span>{% else %}Set type<span class="sr-only"> for {{ s.member.display_name }}</span>{% endif %}</button>
+                        {% endif %}
+                      </div>
+                    {% endif %}
+                  </div>
+                {% endif %}
               </td>
               <td data-done-cell data-mark="{% if s.done %}yes{% else %}no{% endif %}">
                 <div class="completion-mark">
@@ -287,21 +418,39 @@
                     {% include "tasks/partials/task_review_tick.html" with s=s task=task %}
                     {% if s.reviewed %}
                       <span class="completion-mark-note text-brand-text/80" data-review-line>{% if s.reviewed_at %}{{ s.reviewed_at|date:"M j" }} &middot; {% endif %}by {% if s.reviewed_by %}{{ s.reviewed_by.display_name }}{% else %}a former member{% endif %}</span>
-                    {% elif s.done and not marks_locked %}
-                      <span class="completion-mark-note text-brand-text/60">Awaiting review</span>
-                    {% elif s.done %}
+                    {% elif s.review_closed %}
                       <span class="completion-mark-note text-brand-text/60">Not reviewed</span>
+                    {% elif s.done %}
+                      <span class="completion-mark-note text-brand-text/60">Awaiting review</span>
                     {% else %}
                       <span class="completion-mark-note text-brand-text/60" aria-hidden="true">&mdash;</span>
                     {% endif %}
                   </div>
                 </td>
               {% endif %}
+              <td data-verify-cell data-mark="{% if s.verified %}yes{% elif s.done %}pending{% else %}none{% endif %}">
+                <div class="completion-mark">
+                  {% include "tasks/partials/task_verify_tick.html" with s=s task=task %}
+                  {% if s.verified %}
+                    <span class="completion-mark-note text-brand-text/80" data-verify-line>{% if s.verified_at %}{{ s.verified_at|date:"M j" }} &middot; {% endif %}by {% if s.verified_by %}{{ s.verified_by.display_name }}{% else %}a former member{% endif %}</span>
+                  {% elif s.done %}
+                    <span class="completion-mark-note text-brand-text/60">Awaiting verification</span>
+                  {% else %}
+                    <span class="completion-mark-note text-brand-text/60" aria-hidden="true">&mdash;</span>
+                  {% endif %}
+                </div>
+              </td>
             </tr>
           {% endfor %}
         </tbody>
       </table>
       </div>
+      {% if can_set_dates %}
+        {% include "tasks/partials/task_dates_modal.html" with task=task assignee_states=assignee_states %}
+      {% endif %}
+      {% if can_set_type %}
+        {% include "tasks/partials/task_member_type_modal.html" with task=task choices=contribution_type_choices %}
+      {% endif %}
       {% if assignee_count > 3 %}
         <button type="button"
                 class="mt-1 text-xs font-medium text-brand-navy hover:underline"
@@ -324,8 +473,9 @@
               <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" />
             </svg>
             <span>
-              This task is already marked completed, so its records are locked.
+              This task is already marked completed, so parts marked done before then can no longer be reviewed or have their reviews withdrawn, and the Done marks a Lead sets for others are locked.
               {% if is_project_manager %}Mark it not complete first to change them.{% else %}A Lead has to mark it not complete before they can change.{% endif %}
+              Assignees can still tick or untick their own Done (unticking clears its review and verification), parts marked done after completion can still be reviewed and their reviews withdrawn, and any part can still be verified.
             </span>
           </p>
         </div>
@@ -362,6 +512,13 @@
             {% else %}
               <span class="inline-block w-4 h-4 rounded-full border border-brand-light" aria-hidden="true"></span>
               <span class="text-brand-text/70">{{ s.member.display_name }}</span>
+            {% endif %}
+            {# Only what differs from the task, as in the table above. #}
+            {% if s.tracks_credit and s.type_differs %}
+              <span class="text-xs text-brand-text/60" data-member-type="own">&middot; {{ s.contribution_type_label }}</span>
+            {% endif %}
+            {% if s.dates_differ %}
+              <span class="text-xs {% if s.overdue %}text-error{% else %}text-brand-text/60{% endif %}">&middot; {% if s.start_differs %}starts {{ s.own_start|in_zone:s.start_tz|date:"M j" }}{% endif %}{% if s.start_differs and s.deadline_differs %}, {% endif %}{% if s.deadline_differs %}due {{ s.own_deadline|in_zone:s.deadline_tz|date:"M j" }}{% endif %}{% if s.zone_differs %}{% if s.start_differs or s.deadline_differs %}, {% endif %}{{ s.zone_short }}{% endif %}</span>
             {% endif %}
           </li>
         {% endfor %}

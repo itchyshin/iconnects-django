@@ -1,0 +1,10 @@
+{% extends "emails/base_email.txt" %}
+{% block content %}{% autoescape off %}Hi {{ user.display_name }},
+
+{{ author_name }} mentioned you in a comment on "{{ task.name }}" ({{ project.name }}):
+
+{{ excerpt }}
+
+Open the task to read the thread:
+{{ url }}
+{% endautoescape %}{% endblock %}

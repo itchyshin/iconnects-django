@@ -200,6 +200,23 @@ def test_logout_requires_post(client_logged_in):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    "next_url,expected",
+    [
+        ("/accounts/login/?next=/invites/abc/", "/accounts/login/?next=/invites/abc/"),
+        ("https://evil.example/", "/"),
+        ("//evil.example/", "/"),
+        ("", "/"),
+    ],
+)
+def test_logout_follows_only_same_site_next(client_logged_in, next_url, expected):
+    response = client_logged_in.post(reverse("accounts:logout"), {"next": next_url})
+    assert response.status_code == 302
+    assert response["Location"] == expected
+    assert "_auth_user_id" not in client_logged_in.session
+
+
+@pytest.mark.django_db
 def test_profile_requires_login(client):
     response = client.get(reverse("accounts:profile"))
     # Unauthenticated -> redirected to login.

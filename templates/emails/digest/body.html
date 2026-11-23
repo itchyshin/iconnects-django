@@ -1,4 +1,5 @@
 {% extends "emails/base_email.html" %}
+{% load task_tags %}
 {% block title %}i-connects {{ frequency }} digest{% endblock %}
 {% block content %}
 <p>Hi {{ user.name|default:user.email }},</p>
@@ -12,7 +13,7 @@
       <li>
         <strong>{{ task.name }}</strong>
         {% if task.project %} &mdash; {{ task.project.name }}{% endif %}
-        {% if task.deadline %} (due {{ task.deadline|date:"M j, Y" }}){% endif %}
+        {% if task.my_deadline %} (due {{ task.my_deadline|in_zone:task.my_deadline_tz|date:"M j, Y" }}{% if task.my_deadline != task.deadline %}, your individual deadline{% endif %}){% endif %}
       </li>
     {% endfor %}
   </ul>

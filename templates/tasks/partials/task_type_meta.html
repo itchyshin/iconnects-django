@@ -1,7 +1,8 @@
 {% comment %}
   The task's CRediT role, in the same icon-label-value shape as the dates
-  beside it. Renders nothing unless the project tracks contributions as
-  CRediT — the type has no meaning anywhere else.
+  beside it, with how many assignees a Lead gave a type of their own.
+  Renders nothing unless the project tracks contributions as CRediT — the
+  type has no meaning anywhere else.
 {% endcomment %}
 {% if task.project.tracks_credit %}
   <span class="inline-flex items-center gap-1.5">
@@ -14,5 +15,11 @@
     </svg>
     <span>Task type</span>
     <span class="text-brand-navy font-medium">{{ task.get_contribution_type_display }}</span>
+    {% with own=task.assignee_contribution_types.count %}
+      {% if own %}
+        <span class="text-brand-text/60" data-own-type-count="{{ own }}"
+              title="A Lead gave {{ own }} assignee{{ own|pluralize }} a contribution type of their own; the task's type applies to everyone else.">&middot; {{ own }} with own type</span>
+      {% endif %}
+    {% endwith %}
   </span>
 {% endif %}

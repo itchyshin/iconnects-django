@@ -42,7 +42,7 @@
 <div class="flex flex-wrap items-center justify-between gap-3 mb-5">
   <div class="flex items-center gap-2">
     <h2 class="text-lg font-semibold text-brand-navy">Contribution Tracking</h2>
-    {% include "_components/info_popover.html" with label="Contribution Tracking" body="Credit on this project, by CRediT role. A member earns credit on a task when they mark their own part done and a lead completes the task — where the task requires review, once their submission has been reviewed." link_href="https://credit.niso.org/" link_text="What is CRediT?" %}
+    {% include "_components/info_popover.html" with label="Contribution Tracking" body="Credit on this project, by CRediT role. A member earns credit on a task when they mark their own part done and a lead verifies it, under the task's CRediT role. Completing or reopening the task changes nothing here; unticking Verified, or the member undoing their mark, takes the credit back." link_href="https://credit.niso.org/" link_text="What is CRediT?" %}
   </div>
 </div>
 {% if not project.tracks_credit %}
@@ -53,7 +53,7 @@
   {% endcomment %}
   {% if is_project_manager %}
     {% url 'projects:update' pk=project.pk as settings_url %}
-    {% include "_components/empty_state.html" with title="This project isn't tracking contributions" body="Turn on CRediT in the project settings and each task's contributors are credited as it is completed." cta_href=settings_url cta_label="Open project settings" %}
+    {% include "_components/empty_state.html" with title="This project isn't tracking contributions" body="Turn on CRediT in the project settings and each task's contributors are credited as a lead verifies their parts." cta_href=settings_url cta_label="Open project settings" %}
   {% else %}
     {% include "_components/empty_state.html" with title="This project isn't tracking contributions" body="A project lead can turn on CRediT tracking in the project settings." %}
   {% endif %}

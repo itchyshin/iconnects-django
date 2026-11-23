@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 from django.db import models
+from django.db.models import Exists, OuterRef, Q, Subquery
 from django.utils import timezone
 
 from apps.core.enums import AutoAssignNew, CompletedAs, ContributionType, TaskStatus
+from apps.tasks.timezones import default_zone_name, get_zone, validate_timezone
+
+
+def default_task_timezone() -> str:
+    """A task's zone when none is chosen: the server's ``TIME_ZONE``. The
+    task form preselects the Lead's system timezone instead."""
+    return default_zone_name()
 
 
 class KanbanBoard(models.Model):
@@ -59,7 +67,95 @@ class Milestone(models.Model):
         return self.name
 
 
+class TaskQuerySet(models.QuerySet):
+    """Deadline states as queries, matching ``Task.is_overdue`` / ``is_extended``.
+
+    A task past its deadline and still open is *extended* when every assignee
+    who has not marked their part done holds an individual deadline that is
+    still to come (see :class:`AssigneeDeadline`); otherwise it is *overdue*.
+    """
+
+    def past_due(self, now=None):
+        """Open tasks whose task-level deadline has passed (overdue or extended)."""
+        now = now or timezone.now()
+        return self.filter(deadline__lt=now).exclude(status=TaskStatus.COMPLETED)
+
+    @staticmethod
+    def _deadline_states(now):
+        pending = pending_assignments().filter(task_id=OuterRef("pk"))
+        uncovered = pending.filter(
+            ~Exists(
+                AssigneeDeadline.objects.filter(
+                    task_id=OuterRef("task_id"),
+                    member_id=OuterRef("projectmember_id"),
+                    deadline__gte=now,
+                )
+            )
+        )
+        return Exists(pending), Exists(uncovered)
+
+    def overdue(self, now=None):
+        now = now or timezone.now()
+        has_pending, has_uncovered = self._deadline_states(now)
+        return self.past_due(now).filter(~has_pending | has_uncovered)
+
+    def extended(self, now=None):
+        now = now or timezone.now()
+        has_pending, has_uncovered = self._deadline_states(now)
+        return self.past_due(now).filter(has_pending & ~has_uncovered)
+
+    def with_my_deadline(self, user):
+        """Annotate ``my_deadline``: ``user``'s individual deadline on each
+        task where a Lead set one, else the task's own deadline — and
+        ``my_deadline_tz``, the zone that governs it: the member's own zone
+        where they have one with their own deadline, else the task's."""
+        from django.db.models import F, Value
+        from django.db.models.functions import Coalesce, NullIf
+
+        personal = AssigneeDeadline.objects.filter(
+            task_id=OuterRef("pk"), member__users=user, deadline__isnull=False
+        ).order_by("deadline")
+        return self.annotate(
+            my_deadline=Coalesce(
+                Subquery(personal.values("deadline")[:1]), F("deadline")
+            ),
+            my_deadline_tz=Coalesce(
+                NullIf(Subquery(personal.values("timezone")[:1]), Value("")),
+                F("timezone"),
+            ),
+        )
+
+    def overdue_for(self, user, now=None):
+        """Open tasks past ``user``'s own deadline on them. Annotates
+        ``my_deadline`` (see :meth:`with_my_deadline`)."""
+        now = now or timezone.now()
+        return (
+            self.with_my_deadline(user)
+            .filter(my_deadline__lt=now)
+            .exclude(status=TaskStatus.COMPLETED)
+        )
+
+
+def pending_assignments():
+    """Assignment rows (``Task.assigned_members.through``) whose member has not
+    marked their part done: their current TaskLog is missing or not COMPLETED."""
+    through = Task.assigned_members.through
+    current_status = (
+        TaskLog.objects.filter(
+            task_id=OuterRef("task_id"), assigned_to_id=OuterRef("projectmember_id")
+        )
+        .order_by("-created_at", "-id")
+        .values("status")[:1]
+    )
+    return (
+        through.objects.annotate(current_status=Subquery(current_status))
+        .filter(Q(current_status__isnull=True) | ~Q(current_status=TaskStatus.COMPLETED))
+    )
+
+
 class Task(models.Model):
+    objects = TaskQuerySet.as_manager()
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -72,6 +168,17 @@ class Task(models.Model):
     # Task metadata
     deadline = models.DateTimeField(null=True, blank=True)
     start_date = models.DateTimeField(null=True, blank=True)
+    timezone = models.CharField(
+        max_length=64,
+        default=default_task_timezone,
+        validators=[validate_timezone],
+        help_text=(
+            "IANA timezone governing the task's start and due dates: the "
+            "Lead's clock time is read in it, and the dates are shown in it. "
+            "An assignee's own dates may carry a zone of their own "
+            "(``AssigneeDeadline.timezone``)."
+        ),
+    )
     name = models.CharField(max_length=255)
     description = models.TextField(null=True, blank=True)
     tags = models.JSONField(null=True, blank=True)
@@ -186,8 +293,10 @@ class Task(models.Model):
         choices=ContributionType.choices,
         default=ContributionType.OTHER,
         help_text=(
-            "CRediT-aligned contribution type used when a ContributionRecord "
-            "is created on task approval."
+            "CRediT-aligned contribution type an assignee's credit is "
+            "recorded under when a Lead verifies their part — unless a Lead "
+            "gave that assignee a type of their own "
+            "(``AssigneeContributionType``)."
         ),
     )
 
@@ -229,17 +338,136 @@ class Task(models.Model):
         return current
 
     @property
-    def is_overdue(self) -> bool:
-        """Still open past its deadline — a finished task is never late.
-
-        The same rule as the dashboard's overdue count and the overdue-task
-        digest; the browsing views flag it with ``_components/overdue_badge.html``.
-        """
+    def is_past_due(self) -> bool:
+        """Still open past the task-level deadline — overdue or extended."""
         return (
             self.deadline is not None
             and self.status != TaskStatus.COMPLETED
             and self.deadline < timezone.now()
         )
+
+    def _deadline_state(self) -> str | None:
+        """``"overdue"``, ``"extended"`` or None — see :class:`TaskQuerySet`.
+
+        Only a task already past its deadline costs any queries, and those
+        read the prefetched ``task_logs`` / ``assignee_deadlines`` when a
+        view has them. Not cached: a view may complete or reopen the task on
+        the same instance it then renders.
+        """
+        if not self.is_past_due:
+            return None
+        now = timezone.now()
+        current = self._current_logs_by_member()
+        personal = self.personal_deadlines()
+        pending = [
+            m.id
+            for m in self.assigned_members.all()
+            if (log := current.get(m.id)) is None or log.status != TaskStatus.COMPLETED
+        ]
+        extended = bool(pending) and all(
+            (d := personal.get(mid)) is not None and d >= now for mid in pending
+        )
+        return "extended" if extended else "overdue"
+
+    @property
+    def is_overdue(self) -> bool:
+        """Still open past its deadline, and not carried by extensions.
+
+        A finished task is never late. A task past its deadline whose every
+        assignee still working holds an individual deadline yet to come is
+        *extended* instead (:attr:`is_extended`). The same rule as
+        ``Task.objects.overdue()``, which the dashboard counts, the board's
+        Overdue filter and the project overview use; the browsing views flag
+        it with ``_components/overdue_badge.html``.
+        """
+        return self._deadline_state() == "overdue"
+
+    @property
+    def is_extended(self) -> bool:
+        """Past the task deadline, but every assignee not yet done has an
+        individual deadline still to come — see :attr:`is_overdue`."""
+        return self._deadline_state() == "extended"
+
+    def personal_deadlines(self) -> dict:
+        """Each member's individual deadline on this task, keyed by member id
+        (members with only an individual start date are left out)."""
+        return {
+            d.member_id: d.deadline
+            for d in self.assignee_deadlines.all()
+            if d.deadline is not None
+        }
+
+    def personal_start_dates(self) -> dict:
+        """Each member's individual start date on this task, keyed by member id."""
+        return {
+            d.member_id: d.start_date
+            for d in self.assignee_deadlines.all()
+            if d.start_date is not None
+        }
+
+    @property
+    def tz(self):
+        """The ``ZoneInfo`` governing the task's own dates."""
+        return get_zone(self.timezone)
+
+    def _own_entry(self, member):
+        if member is None or member.pk is None:
+            return None
+        for entry in self.assignee_deadlines.all():
+            if entry.member_id == member.pk:
+                return entry
+        return None
+
+    def start_zone_for(self, member):
+        """The zone governing ``member``'s start date: their own zone when
+        they have their own start date, else the task's."""
+        entry = self._own_entry(member)
+        if entry is not None and entry.start_date is not None:
+            return entry.tz
+        return self.tz
+
+    def deadline_zone_for(self, member):
+        """The zone governing ``member``'s deadline: their own zone when they
+        have their own deadline, else the task's."""
+        entry = self._own_entry(member)
+        if entry is not None and entry.deadline is not None:
+            return entry.tz
+        return self.tz
+
+    def start_date_for(self, member):
+        """``member``'s effective start date: their individual one, if a Lead
+        set it, else the task's. None when neither exists."""
+        if member is not None and member.pk is not None:
+            personal = self.personal_start_dates().get(member.pk)
+            if personal is not None:
+                return personal
+        return self.start_date
+
+    def deadline_for(self, member):
+        """``member``'s effective deadline: their individual one, if a Lead set
+        it, else the task's. None when neither exists."""
+        if member is not None and member.pk is not None:
+            personal = self.personal_deadlines().get(member.pk)
+            if personal is not None:
+                return personal
+        return self.deadline
+
+    def personal_contribution_types(self) -> dict:
+        """Each member's own contribution type on this task, keyed by member
+        id — only members a Lead gave one (``AssigneeContributionType``)."""
+        return {
+            o.member_id: o.contribution_type
+            for o in self.assignee_contribution_types.all()
+        }
+
+    def contribution_type_for(self, member) -> str:
+        """``member``'s effective contribution type: their own, if a Lead set
+        one, else the task's. This is what their credit is recorded under."""
+        if member is not None and member.pk is not None:
+            own = self.personal_contribution_types().get(member.pk)
+            if own:
+                return own
+        return self.contribution_type
 
     @property
     def assignee_count(self) -> int:
@@ -370,6 +598,27 @@ class TaskLog(models.Model):
             "review, and when the assignee reverts their own done mark."
         ),
     )
+    verified_by = models.ForeignKey(
+        "projects.ProjectMember",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="task_logs_verified",
+        help_text=(
+            "The Lead who verified this member's contribution, which is what "
+            "credits them for it. Nulled only if the Lead's membership row is "
+            "deleted outright; the credit they wrote stands."
+        ),
+    )
+    verified_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "When a Lead verified this contribution. Null means not verified: "
+            "the pair is cleared when the Lead withdraws the verification, and "
+            "when the assignee reverts their own done mark."
+        ),
+    )
 
     class Meta:
         ordering = ["-created_at"]
@@ -378,6 +627,7 @@ class TaskLog(models.Model):
             models.Index(fields=["assigned_to"]),
             models.Index(fields=["completed_by"]),
             models.Index(fields=["reviewed_by"]),
+            models.Index(fields=["verified_by"]),
         ]
 
     def __str__(self) -> str:
@@ -394,9 +644,133 @@ class TaskLog(models.Model):
         return self.reviewed_at is not None
 
     @property
+    def is_verified(self) -> bool:
+        """True when a Lead has verified this contribution.
+
+        ``verified_at`` is the flag, set and cleared together with
+        ``verified_by``, as ``reviewed_at`` is for reviews.
+        """
+        return self.verified_at is not None
+
+    @property
     def is_reviewable(self) -> bool:
         """True when there is a submission here for a reviewer to act on."""
         return self.status == TaskStatus.COMPLETED
+
+
+class AssigneeDeadline(models.Model):
+    """Individual dates a Lead set for one assignee on a task: their own
+    start date, their own deadline, or both.
+
+    The task's own ``start_date`` and ``deadline`` still hold for the task and
+    for every other assignee; each date set here replaces the task's for
+    ``member`` alone, and may be earlier or later. A date left empty follows
+    the task's. The row exists only while at least one of the two is set
+    (``services.set_member_dates`` deletes it otherwise). It belongs to the
+    assignment: taking the member off the task deletes it
+    (``apps.tasks.signals``).
+    """
+
+    task = models.ForeignKey(
+        Task, on_delete=models.CASCADE, related_name="assignee_deadlines"
+    )
+    member = models.ForeignKey(
+        "projects.ProjectMember",
+        on_delete=models.CASCADE,
+        related_name="individual_deadlines",
+    )
+    start_date = models.DateTimeField(null=True, blank=True)
+    deadline = models.DateTimeField(null=True, blank=True)
+    timezone = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        validators=[validate_timezone],
+        help_text=(
+            "IANA timezone governing this member's own dates. Empty follows "
+            "the task's zone. A date the member follows from the task stays "
+            "in the task's zone."
+        ),
+    )
+    reason = models.CharField(max_length=500, blank=True, default="")
+    set_by = models.ForeignKey(
+        "projects.ProjectMember",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        help_text="The Lead who last set these dates.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["task", "member"], name="unique_assignee_deadline"
+            )
+        ]
+        indexes = [models.Index(fields=["member", "deadline"])]
+
+    def __str__(self) -> str:
+        return f"Individual dates for member {self.member_id} on task {self.task_id}"
+
+    @property
+    def tz(self):
+        """The ``ZoneInfo`` governing this member's own dates: their own
+        zone, else the task's."""
+        return get_zone(self.timezone or self.task.timezone)
+
+
+class AssigneeContributionType(models.Model):
+    """A contribution type a Lead set for one assignee on a task.
+
+    The task's own ``contribution_type`` still holds for the task and for
+    every other assignee; the type set here replaces it for ``member`` alone,
+    so their credit is recorded under it when their part is verified
+    (``Task.contribution_type_for``). The row exists only while the member has
+    a type of their own: putting them back on the task's deletes it
+    (``services.set_member_contribution_type``). It belongs to the
+    assignment: taking the member off the task deletes it
+    (``apps.tasks.signals``).
+    """
+
+    task = models.ForeignKey(
+        Task, on_delete=models.CASCADE, related_name="assignee_contribution_types"
+    )
+    member = models.ForeignKey(
+        "projects.ProjectMember",
+        on_delete=models.CASCADE,
+        related_name="individual_contribution_types",
+    )
+    contribution_type = models.CharField(
+        max_length=32,
+        choices=ContributionType.choices,
+    )
+    set_by = models.ForeignKey(
+        "projects.ProjectMember",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        help_text="The Lead who last set this type.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["task", "member"],
+                name="unique_assignee_contribution_type",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"Contribution type {self.contribution_type} for member "
+            f"{self.member_id} on task {self.task_id}"
+        )
 
 
 class ActivityEvent(models.TextChoices):

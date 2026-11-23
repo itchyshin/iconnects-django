@@ -30,7 +30,7 @@
               <td>
                 <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
                   {% if inv.privilege == 'PROJECT_MANAGER' %}bg-brand-coral/10 text-brand-coral{% else %}bg-brand-light/60 text-brand-text{% endif %}">
-                  {{ inv.privilege }}
+                  {{ inv.get_privilege_display }}
                 </span>
               </td>
               <td class="text-sm text-brand-text/70">{{ inv.created_at|date:"Y-m-d" }}</td>

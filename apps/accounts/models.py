@@ -86,6 +86,12 @@ class User(AbstractUser):
         choices=EmailFrequency.choices,
         default=EmailFrequency.NEVER,
     )
+    # Sent the moment a Lead assigns a task, unlike the digests above. On by
+    # default: for members who rarely log in it is how they hear of new work.
+    email_task_assigned = models.BooleanField(default=True)
+    # Sent the moment someone tags this person in a task comment (@Name).
+    # On by default for the same reason: a tag is a direct request for them.
+    email_comment_mention = models.BooleanField(default=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

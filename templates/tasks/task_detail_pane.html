@@ -62,7 +62,7 @@
       same reason. Out here both survive the swap.
     {% endcomment %}
     <div x-data="{ rowsExpanded: false, sortKey: '', sortDesc: false }">
-    {% include "tasks/partials/task_status_block.html" with task=task is_project_manager=status_block.is_project_manager assignee_states=status_block.assignee_states done_count=status_block.done_count marks_locked=status_block.marks_locked reviewed_count=status_block.reviewed_count needs_review=status_block.needs_review show_review=status_block.show_review reviewers=status_block.reviewers assignee_count=status_block.assignee_count is_assignee=status_block.is_assignee my_done=status_block.my_done pane_mode=True %}
+    {% include "tasks/partials/task_status_block.html" with task=task is_project_manager=status_block.is_project_manager assignee_states=status_block.assignee_states done_count=status_block.done_count marks_locked=status_block.marks_locked reviewed_count=status_block.reviewed_count verified_count=status_block.verified_count verify_done_count=status_block.verify_done_count verify_reviewed_count=status_block.verify_reviewed_count needs_review=status_block.needs_review show_review=status_block.show_review reviewers=status_block.reviewers assignee_count=status_block.assignee_count is_assignee=status_block.is_assignee my_done=status_block.my_done pending_dates_count=status_block.pending_dates_count can_set_dates=status_block.can_set_dates can_set_type=status_block.can_set_type own_type_count=status_block.own_type_count contribution_type_choices=status_block.contribution_type_choices pane_mode=True %}
     </div>
 
     {% comment %}
@@ -79,11 +79,18 @@
           Comments{% if total %} <span class="normal-case tracking-normal font-normal text-brand-text/60">{{ total }}</span>{% endif %}
         </h3>
 
-        {% with pk=task.pk|stringformat:"s" %}
-          {% include "comments/comment_form.html" with task=task form=comment_form target="#task-pane-comments-"|add:pk %}
-        {% endwith %}
+        {% comment %}
+          The box is for the task's participants: its creator, assignees and
+          reviewers. Everyone else in the project reads the thread, with no
+          box and no send button above it.
+        {% endcomment %}
+        {% if can_comment %}
+          {% with pk=task.pk|stringformat:"s" %}
+            {% include "comments/comment_form.html" with task=task form=comment_form target="#task-pane-comments-"|add:pk %}
+          {% endwith %}
+        {% endif %}
 
-        <div x-data="{ expanded: false }" class="mt-4">
+        <div x-data="{ expanded: false }" {% if can_comment %}class="mt-4"{% endif %}>
           <div id="task-pane-comments-{{ task.pk }}" class="flex flex-col gap-3">
             {% for comment in task.comments.all|slice:":3" %}
               {% include "comments/comment_item.html" with comment=comment task=task project_member=project_member is_project_manager=is_project_manager %}

@@ -113,7 +113,7 @@
               &rarr; <span class="text-brand-text">{{ rec.get_contribution_type_display }}</span>
             </div>
             <div class="text-xs text-brand-text/60 mt-0.5">
-              {{ rec.closed_at|date:"M j, Y" }} &middot; closed by {{ rec|closed_by }}
+              {{ rec.closed_at|date:"M j, Y" }} &middot; verified by {{ rec|closed_by }}
             </div>
           </li>
         {% endfor %}

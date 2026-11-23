@@ -9,6 +9,8 @@ from apps.tasks import views
 app_name = "tasks"
 
 urlpatterns = [
+    # The timezone picker's list of zones (JSON, cached by the browser)
+    path("tasks/timezones.json", views.TimezoneListView.as_view(), name="timezones"),
     # All tasks (cross-project)
     path(
         "tasks/",
@@ -137,6 +139,26 @@ urlpatterns = [
         "tasks/<int:pk>/logs/<int:log_pk>/review/",
         views.TaskLogReviewView.as_view(),
         name="review_log",
+    ),
+    path(
+        "tasks/<int:pk>/logs/<int:log_pk>/verify/",
+        views.TaskLogVerifyView.as_view(),
+        name="verify_log",
+    ),
+    path(
+        "tasks/<int:pk>/verify/",
+        views.TaskVerifyBatchView.as_view(),
+        name="verify_batch",
+    ),
+    path(
+        "tasks/<int:pk>/member-dates/",
+        views.TaskMemberDatesView.as_view(),
+        name="member_dates",
+    ),
+    path(
+        "tasks/<int:pk>/member-type/",
+        views.TaskMemberContributionTypeView.as_view(),
+        name="member_type",
     ),
     # Board columns
     path(

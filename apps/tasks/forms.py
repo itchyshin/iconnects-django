@@ -16,6 +16,19 @@ from apps.core.enums import (
 )
 from apps.projects.models import ProjectMember
 from apps.tasks.models import KanbanBoard, Milestone, Task, TaskLog
+from apps.tasks.timezones import (
+    DEFAULT_DUE_TIME,
+    DEFAULT_START_TIME,
+    DateTimeSplitWidget,
+    TimezoneField,
+    ZonedDateTimeField,
+    canonical,
+    carried_own_date,
+    default_zone_name,
+    format_when,
+    get_zone,
+    picker_value,
+)
 
 
 _daisy_input = "input input-bordered w-full"
@@ -108,6 +121,46 @@ class MemberMultiSelect(forms.SelectMultiple):
         )
 
 
+def _when(value, zone=None) -> str:
+    """``value`` in ``zone`` (the server's when None), with the zone's
+    abbreviation."""
+    return format_when(value, zone)
+
+
+def start_after_deadline_problems(rows) -> list[str]:
+    """One sentence per member whose own start would fall after their deadline.
+
+    The one rule for a member's dates: when they have a start date of their
+    own, the deadline they end up with (their own, else the task's) must be
+    on or after it. A member who follows the task's start is not checked —
+    their own deadline may be earlier than the task's start or due date, to
+    suit collaborators in other timezones. Callers pass only members with an
+    own start.
+
+    ``rows`` are ``(member, start, deadline)`` — the dates each member would
+    end up with, their own where they have one, else the task's — or
+    ``(member, start, deadline, start zone, deadline zone)``, naming the
+    zone each date is shown in. Dates are compared as instants, so a start
+    and deadline in different zones compare correctly. A start equal to the
+    deadline is fine, and a missing date on either side has nothing to
+    compare. A start must never come after the deadline, for the task or
+    for any member (see ``TaskForm.clean`` and ``AssigneeDatesForm.clean``).
+    """
+    problems = []
+    for member, start, deadline, *zones in rows:
+        if start is None or deadline is None or start <= deadline:
+            continue
+        start_zone, deadline_zone = zones if zones else (None, None)
+        problems.append(
+            f"{member.display_name} would start {_when(start, start_zone)}, "
+            f"after their deadline ({_when(deadline, deadline_zone)})."
+        )
+    return problems
+
+
+_DATE_INPUT_FORMATS = ["%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"]
+
+
 class TaskForm(forms.ModelForm):
     """Create / update a Task.
 
@@ -117,26 +170,59 @@ class TaskForm(forms.ModelForm):
     from a column can pre-fill it without surfacing the field in the UI.
     """
 
-    # datetime-local inputs require the HTML5 "YYYY-MM-DDTHH:MM" format for
-    # both the value they submit and the value they're pre-filled with;
-    # Django's default DATETIME_INPUT_FORMATS is space-separated, which the
-    # browser silently rejects (the field just renders blank).
-    deadline = forms.DateTimeField(
+    # Both are read and shown in the task's timezone (``timezone`` below),
+    # not the server's: see ``_init_timezone``.
+    #
+    # Each is a day picker and a time picker (``DateTimeSplitWidget``); the
+    # time starts on 9:00 AM for the start date and 5:00 PM for the due
+    # date, so picking only a day gives those times.
+    deadline = ZonedDateTimeField(
         required=False,
-        input_formats=["%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"],
-        widget=forms.DateTimeInput(
-            attrs={"type": "datetime-local", "class": _daisy_input},
-            format="%Y-%m-%dT%H:%M",
+        input_formats=_DATE_INPUT_FORMATS,
+        widget=DateTimeSplitWidget(
+            DEFAULT_DUE_TIME, attrs={"class": f"{_daisy_input} px-3"}, time_label="Due time"
         ),
     )
-    start_date = forms.DateTimeField(
+    start_date = ZonedDateTimeField(
         required=False,
-        input_formats=["%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"],
-        widget=forms.DateTimeInput(
-            attrs={"type": "datetime-local", "class": _daisy_input},
-            format="%Y-%m-%dT%H:%M",
+        input_formats=_DATE_INPUT_FORMATS,
+        widget=DateTimeSplitWidget(
+            DEFAULT_START_TIME, attrs={"class": f"{_daisy_input} px-3"}, time_label="Start time"
         ),
     )
+    # The IANA zone governing the start and due dates. The picker starts on
+    # the Lead's system timezone for a new task and on the saved zone when
+    # editing (``_components/timezone_select.html``); left empty (no
+    # script), a new task takes the server's zone and an edit keeps its own.
+    timezone = TimezoneField(label="Timezone")
+    # Asked only when editing a task some assignees have their own start
+    # date / deadline on, and only acted on when the task's matching date
+    # changes: what happens to those members' own dates. See
+    # ``_init_individual_dates``.
+    individual_start_dates = forms.ChoiceField(
+        required=False,
+        choices=[
+            ("shift", "Shift them by the same amount"),
+            ("keep", "Keep their dates as they are"),
+            ("clear", "Remove them, so they follow the task's start date"),
+        ],
+        widget=forms.RadioSelect,
+    )
+    individual_deadlines = forms.ChoiceField(
+        required=False,
+        choices=[
+            ("shift", "Shift them by the same amount"),
+            ("keep", "Keep their dates as they are"),
+            ("clear", "Remove them, so they follow the task's due date"),
+        ],
+        widget=forms.RadioSelect,
+    )
+
+    # Task date field -> the choice field asking about members' own dates.
+    INDIVIDUAL_DATE_CHOICES = {
+        "start_date": "individual_start_dates",
+        "deadline": "individual_deadlines",
+    }
 
     class Meta:
         model = Task
@@ -149,6 +235,7 @@ class TaskForm(forms.ModelForm):
             "reviewers",
             "start_date",
             "deadline",
+            "timezone",
             "contribution_type",
             "is_priority",
         ]
@@ -197,6 +284,8 @@ class TaskForm(forms.ModelForm):
         # not the model's default "{name} (project {id})" representation.
         self.fields["container"].label_from_instance = lambda obj: obj.name
         self._init_task_type(project)
+        self._init_timezone()
+        self._init_individual_dates()
         if project is not None:
             self.fields["container"].queryset = KanbanBoard.objects.filter(project=project)
             members = (
@@ -224,7 +313,8 @@ class TaskForm(forms.ModelForm):
         field.label = "Task type"
         field.help_text = (
             "The CRediT role this task's contributors are credited with "
-            "when it is completed."
+            "when their part is verified. A Lead can give an assignee a "
+            "different role of their own from the task's completion table."
         )
         current = self.instance.contribution_type if self.instance.pk else None
         choices = credit_role_choices(current)
@@ -240,6 +330,222 @@ class TaskForm(forms.ModelForm):
         # otherwise come up preselected; both save as "Other".
         if not self.instance.pk and "contribution_type" not in self.initial:
             field.initial = ""
+
+    def _init_timezone(self):
+        """Read and show the date fields in the task's zone.
+
+        ``original_zone_name`` is the zone the task had before this edit
+        (None for a new task). The zone the dates are read in is the one
+        submitted with them, so a Lead who changes the zone keeps the clock
+        times they typed, now in the new zone; one left empty or unknown
+        falls back to the task's zone, or for a new task the server's.
+        """
+        self.original_zone_name = self.instance.timezone if self.instance.pk else None
+        fallback = self.original_zone_name or default_zone_name()
+        submitted = (
+            canonical(self.data.get(self.add_prefix("timezone"))) if self.is_bound else None
+        )
+        self.zone_name = submitted or fallback
+        zone = get_zone(self.zone_name)
+        for name in ("start_date", "deadline"):
+            self.fields[name].zone = zone
+        field = self.fields["timezone"]
+        field.help_text = "The start and due dates are in this timezone."
+        if not self.instance.pk and "timezone" not in self.initial:
+            # Empty: the picker fills in the Lead's system timezone.
+            self.initial["timezone"] = ""
+
+    def clean_timezone(self):
+        """An empty zone keeps the task's, or for a new task takes the
+        server's."""
+        return self.cleaned_data.get("timezone") or self.original_zone_name or default_zone_name()
+
+    @property
+    def new_zone_name(self) -> str:
+        cleaned = getattr(self, "cleaned_data", {}) or {}
+        return cleaned.get("timezone") or self.zone_name
+
+    def zone_changed(self) -> bool:
+        """Whether this edit moves the task to another timezone."""
+        return bool(
+            self.original_zone_name
+            and canonical(self.new_zone_name) != canonical(self.original_zone_name)
+        )
+
+    def _init_individual_dates(self):
+        """Offer each individual-dates choice when editing a task some members
+        have that kind of own date on; drop the field otherwise.
+
+        ``individual_rows[field]`` lists ``(member, own date)`` for the panel.
+        Shifting is preselected where it can apply (the task has that date
+        now, so there is an amount to shift by); otherwise keeping them is.
+        """
+        entries = (
+            list(
+                self.instance.assignee_deadlines.select_related("member")
+                .prefetch_related("member__users")
+                .order_by("id")
+            )
+            if self.instance.pk
+            else []
+        )
+        self.individual_entries = entries
+        self.original_dates = {}
+        self.individual_rows = {}
+        for date_field, choice_field in self.INDIVIDUAL_DATE_CHOICES.items():
+            original = getattr(self.instance, date_field) if self.instance.pk else None
+            self.original_dates[date_field] = original
+            # (member, own date, the zone it is shown in, its clock time
+            # there as the date picker writes it — for the shift preview).
+            rows = sorted(
+                (
+                    (
+                        e.member,
+                        getattr(e, date_field),
+                        e.timezone or self.original_zone_name,
+                        picker_value(
+                            getattr(e, date_field),
+                            e.timezone or self.original_zone_name,
+                        ),
+                    )
+                    for e in entries
+                    if getattr(e, date_field) is not None
+                ),
+                key=lambda row: row[1],
+            )
+            self.individual_rows[date_field] = rows
+            if not rows:
+                self.fields.pop(choice_field, None)
+                continue
+            field = self.fields[choice_field]
+            field.label = (
+                "Individual start dates" if date_field == "start_date" else "Individual deadlines"
+            )
+            if choice_field not in self.initial:
+                field.initial = "shift" if original else "keep"
+
+    # Read by the template and the view.
+    @property
+    def original_start_date(self):
+        return self.original_dates.get("start_date")
+
+    @property
+    def original_deadline(self):
+        return self.original_dates.get("deadline")
+
+    @property
+    def original_start_input(self):
+        return picker_value(self.original_start_date, self.original_zone_name)
+
+    @property
+    def original_deadline_input(self):
+        return picker_value(self.original_deadline, self.original_zone_name)
+
+    @property
+    def individual_start_rows(self):
+        return self.individual_rows.get("start_date", [])
+
+    @property
+    def individual_deadline_rows(self):
+        return self.individual_rows.get("deadline", [])
+
+    @staticmethod
+    def _to_minute(value):
+        return value.replace(second=0, microsecond=0) if value else None
+
+    def _resulting_own_date(self, entry, date_field: str, new_value):
+        """The own ``date_field`` ``entry``'s member would have after this
+        edit: shifted, kept or removed as the Lead chose, when the task's
+        date moved; as it is otherwise. A member whose dates follow the
+        task's zone keeps their clock times when the zone changes. See
+        ``timezones.carried_own_date``, which the save applies too."""
+        choice_field = self.INDIVIDUAL_DATE_CHOICES[date_field]
+        moved = choice_field in self.fields and self.date_changed(date_field)
+        return carried_own_date(
+            getattr(entry, date_field),
+            own_zone=entry.timezone,
+            old_task_zone=self.original_zone_name or self.new_zone_name,
+            new_task_zone=self.new_zone_name,
+            old_value=self.original_dates[date_field],
+            new_value=new_value,
+            choice=(self.cleaned_data.get(choice_field) or "keep") if moved else "keep",
+            moved=moved,
+        )
+
+    def date_changed(self, date_field: str) -> bool:
+        """Whether this edit moves, sets or clears the task's ``date_field``.
+
+        Compared to the minute, the picker's precision, so a date stored
+        with seconds is not "changed" by a re-save.
+        """
+        if not hasattr(self, "cleaned_data") or date_field not in self.cleaned_data:
+            return False
+        return self._to_minute(self.cleaned_data[date_field]) != self._to_minute(
+            self.original_dates.get(date_field)
+        )
+
+    def changed_individual_dates(self):
+        """``(date field, choice)`` for each task date this edit moved that
+        some members have their own of — what the view carries over."""
+        return [
+            (date_field, self.cleaned_data.get(choice_field) or "keep")
+            for date_field, choice_field in self.INDIVIDUAL_DATE_CHOICES.items()
+            if choice_field in self.fields and self.date_changed(date_field)
+        ]
+
+    def _check_member_date_order(self, cleaned) -> None:
+        """No member with a start of their own may end up starting after
+        their deadline.
+
+        Checked when this edit moves the task's start or due date (or its
+        zone), on the dates each member still on the task would end up with:
+        their own, shifted, kept or removed as the Lead chose, else the
+        task's new ones. Only members left with an own start are checked
+        (``start_after_deadline_problems``): one following the task's start
+        may have an own deadline before it. The error goes on the panels the
+        Lead answered (or, where no panel applies — say the task's due date
+        moved before a member's own start — on the task date that moved), so
+        it shows where the choice is made.
+        """
+        changed = [f for f in ("start_date", "deadline") if self.date_changed(f)]
+        watched = [
+            "start_date", "deadline", "timezone", *self.INDIVIDUAL_DATE_CHOICES.values()
+        ]
+        if (
+            not (changed or self.zone_changed())
+            or not self.individual_entries
+            or any(name in self.errors for name in watched)
+        ):
+            return
+        start = cleaned.get("start_date")
+        deadline = cleaned.get("deadline")
+        assigned = cleaned.get("assigned_members")
+        assigned_ids = None if assigned is None else {m.pk for m in assigned}
+        rows = []
+        for entry in self.individual_entries:
+            if assigned_ids is not None and entry.member_id not in assigned_ids:
+                continue  # taken off the task: their own dates go with them
+            own_start = self._resulting_own_date(entry, "start_date", start)
+            if own_start is None:
+                continue  # follows the task's start: nothing to check
+            own_deadline = self._resulting_own_date(entry, "deadline", deadline)
+            own_zone = entry.timezone or self.new_zone_name
+            # Both shown in the zone the member's own dates are in.
+            rows.append((entry.member, own_start, own_deadline or deadline, own_zone, own_zone))
+        problems = start_after_deadline_problems(rows)
+        if not problems:
+            return
+        message = " ".join(problems) + (
+            " A start date must be on or before the deadline: choose differently "
+            "for their own dates, or change the task's dates."
+        )
+        targets = [
+            self.INDIVIDUAL_DATE_CHOICES[f]
+            for f in changed
+            if self.INDIVIDUAL_DATE_CHOICES[f] in self.fields
+        ] or changed or ["timezone"]
+        for target in targets:
+            self.add_error(target, message)
 
     def clean_contribution_type(self):
         """An unpicked task type falls back to the model's own default."""
@@ -263,6 +569,35 @@ class TaskForm(forms.ModelForm):
             self.add_error(
                 "start_date", "Start date must be before or equal to the due date."
             )
+
+        # Moving the start or due date of a task some members have their own
+        # of asks the Lead what happens to those, every time.
+        names = {"start_date": "start date", "deadline": "deadline"}
+        task_names = {"start_date": "start date", "deadline": "due date"}
+        for date_field, choice_field in self.INDIVIDUAL_DATE_CHOICES.items():
+            if choice_field not in self.fields or not self.date_changed(date_field):
+                continue
+            choice = cleaned.get(choice_field)
+            new_value = cleaned.get(date_field)
+            if not choice:
+                self.add_error(
+                    choice_field,
+                    f"Some assignees have their own {names[date_field]}. Choose "
+                    "whether to shift, keep or remove them.",
+                )
+            elif choice == "shift" and not (new_value and self.original_dates[date_field]):
+                self.add_error(
+                    choice_field,
+                    "There is no change of date to shift by: the task "
+                    + (
+                        f"had no {task_names[date_field]}."
+                        if new_value
+                        else f"no longer has a {task_names[date_field]}."
+                    )
+                    + f" Keep or remove the individual {names[date_field]}s instead.",
+                )
+
+        self._check_member_date_order(cleaned)
 
         if cleaned.get("requires_review"):
             if not cleaned.get("reviewers"):
@@ -368,3 +703,144 @@ class TaskMilestoneForm(forms.Form):
         super().__init__(*args, **kwargs)
         if project is not None:
             self.fields["milestone"].queryset = Milestone.objects.filter(project=project)
+
+
+class AssigneeDatesForm(forms.Form):
+    """A Lead's own start date and/or deadline for one assignee, or for every
+    assignee not yet done (``views.TaskMemberDatesView``). The dialog starts
+    both on the task's dates; a date sent back at the task's moment counts
+    as not set.
+
+    Each date may be earlier or later than the task's. For one member
+    (``scope="member"``) the dialog shows their current own dates, so an
+    empty date means "follow the task's" and both empty removes them. For
+    everyone not yet done (``scope="pending"``) an empty date means "leave
+    each member's as it is", so at least one is needed.
+
+    The one rule: a start date of the member's own must not fall after the
+    deadline they end up with (their own, else the task's), compared as
+    moments and reported in the member's timezone. Their deadline may be
+    earlier than the task's start or due date, and may be in the past.
+
+    ``timezone`` governs the member's own dates: the dates are read in it,
+    and shown in it afterwards. Empty means "Same as task": the task's zone.
+    A zone for a member with no own dates, sent with no dates, is refused:
+    it would have nothing to govern.
+    For everyone not done, it becomes each member's zone; a date left empty
+    keeps its moment in time and is shown in that zone from then on.
+    """
+
+    # A day and a time each (``DateTimeSplitWidget``), as on the task form.
+    start_date = ZonedDateTimeField(
+        required=False, input_formats=_DATE_INPUT_FORMATS,
+        widget=DateTimeSplitWidget(DEFAULT_START_TIME),
+    )
+    deadline = ZonedDateTimeField(
+        required=False, input_formats=_DATE_INPUT_FORMATS,
+        widget=DateTimeSplitWidget(DEFAULT_DUE_TIME),
+    )
+    # The zone governing the member's own dates. Empty ("Same as task")
+    # follows the task's zone. The dialog starts on the Lead's system
+    # timezone unless the member already has their own dates.
+    timezone = TimezoneField()
+    reason = forms.CharField(required=False, max_length=500)
+
+    def __init__(
+        self, *args, task, scope="member", current=None, pending=(), member=None,
+        **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+        self.task = task
+        self.scope = scope
+        self.member = member  # scope "member": the assignee, for messages
+        self.current = current  # the member's AssigneeDeadline, if any
+        # scope "pending": (member, their AssigneeDeadline or None) for each
+        # assignee not yet done — whose dates a date left empty keeps.
+        self.pending = list(pending)
+        # The dates are read in the zone submitted with them, else the
+        # task's.
+        submitted = canonical(self.data.get(self.add_prefix("timezone")))
+        self.zone_name = submitted or task.timezone
+        for name in ("start_date", "deadline"):
+            self.fields[name].zone = get_zone(self.zone_name)
+
+    @staticmethod
+    def _minute(value):
+        return value.replace(second=0, microsecond=0) if value else None
+
+    def clean(self):
+        cleaned = super().clean()
+        if self.errors:
+            return cleaned
+        # The dialog starts a date the member has no own value for (and, for
+        # everyone not done, both dates) on the task's; one sent back at the
+        # task's moment is not a date of their own. For one member it
+        # follows the task's; for everyone not done it keeps each member's
+        # own, as an empty one does.
+        for name in ("start_date", "deadline"):
+            value, task_value = cleaned.get(name), getattr(self.task, name)
+            if (
+                value is not None
+                and task_value is not None
+                and self._minute(value) == self._minute(task_value)
+            ):
+                cleaned[name] = None
+        start = cleaned.get("start_date")
+        deadline = cleaned.get("deadline")
+        if self.scope == "pending" and start is None and deadline is None:
+            raise forms.ValidationError(
+                "Change the start date or the deadline: a date left at the "
+                "task's keeps each member's own."
+            )
+        # A member's zone is kept with their own dates and governs only
+        # those, so one with no own dates, given none here, has nothing for
+        # it to apply to: say so rather than save nothing. (A member who
+        # has own dates and is sent none has them removed, as ever.)
+        if (
+            self.scope == "member"
+            and self.current is None
+            and start is None
+            and deadline is None
+            and cleaned.get("timezone")
+        ):
+            name = self.member.display_name if self.member is not None else "this member"
+            raise forms.ValidationError(
+                f"Set a start date or deadline for {name} first \u2014 a "
+                "contributor's timezone applies to their own dates."
+            )
+        # The one rule: a start of the member's own must be on or before the
+        # deadline they end up with. For one member an empty date follows
+        # the task's; for everyone not done it is left as each member has it
+        # (their own, else the task's). Shown in the member's timezone.
+        if self.scope == "pending":
+            rows = []
+            # Every member gets the dialog's zone, so their dates read in it.
+            zone = self.zone_name
+            for member, entry in self.pending:
+                own_start = start or (entry and entry.start_date)
+                if not own_start:
+                    continue  # follows the task's start
+                own_deadline = deadline or (entry and entry.deadline)
+                rows.append((
+                    member, own_start, own_deadline or self.task.deadline, zone, zone,
+                ))
+            problems = start_after_deadline_problems(rows)
+            if problems:
+                self.add_error(
+                    "start_date" if start is not None else "deadline",
+                    " ".join(problems)
+                    + " A start date must be on or before the deadline.",
+                )
+        elif start is not None:
+            effective_deadline = deadline or self.task.deadline
+            if effective_deadline is not None and start > effective_deadline:
+                self.add_error(
+                    "start_date",
+                    "The start date ("
+                    + _when(start, self.zone_name)
+                    + ") must be on or before the deadline ("
+                    + _when(effective_deadline, self.zone_name)
+                    + ").",
+                )
+        return cleaned
+

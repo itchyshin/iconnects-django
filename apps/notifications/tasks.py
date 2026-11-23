@@ -18,7 +18,7 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 
 from apps.core.emails import send_templated_email
-from apps.core.enums import EmailFrequency, TaskStatus
+from apps.core.enums import EmailFrequency
 
 logger = logging.getLogger(__name__)
 
@@ -41,19 +41,18 @@ def _recent_notifications(user, since):
 
 
 def _overdue_tasks_for(user):
-    """Return tasks past deadline and not completed that ``user`` is assigned to."""
+    """Return open tasks ``user`` is assigned to that are past *their*
+    deadline: their individual one where a Lead set it, else the task's.
+    Each carries ``my_deadline``."""
     from apps.tasks.models import Task
 
     now = timezone.now()
     return list(
-        Task.objects.filter(
-            deadline__lt=now,
-            status=TaskStatus.NOT_COMPLETED,
-            assigned_members__users=user,
-        )
+        Task.objects.filter(assigned_members__users=user)
+        .overdue_for(user, now)
         .select_related("project")
         .distinct()
-        .order_by("deadline")[:50]
+        .order_by("my_deadline")[:50]
     )
 
 

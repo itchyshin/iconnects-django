@@ -1,0 +1,143 @@
+{% comment %}
+  The Lead's individual-dates dialog, in the app's standard modal: a
+  daisyUI <dialog> with a navy title, Cancel and a coral primary action, and
+  a click-outside backdrop that closes it (the same shape as
+  task_verify_batch_modal.html).
+
+  One dialog serves the whole completion table. It opens on an
+  ``open-dates`` window event, whose detail fills it in:
+
+    scope        "member" for one assignee, "pending" for every assignee
+                 not yet done
+    member       the assignee's ProjectMember id (scope "member")
+    name         their display name, for the title
+    start        their own start date (YYYY-MM-DDTHH:MM, local), or ""
+    value        their own deadline, likewise
+    reason       the note on their own dates, if any
+    hasPersonal  whether they have own dates, which offers Remove
+    timezone     the zone saved with their own dates: "" for "Same as
+                 task", or null when they have no own dates (and for
+                 scope "pending") — the picker then starts on the Lead's
+                 system timezone (_components/timezone_select.html)
+
+  For one member each date holds their own, in the zone that governs it;
+  one they have no own value for starts on the task's, as the same moment
+  in the zone the dialog opens on (memberDatesDialog in base.html). Picking
+  another timezone leaves the dates and times as they are: they are saved
+  as that clock time in the new zone. A date sent back at the task's
+  moment, or emptied, follows the task's. Emptying both removes their own
+  dates. For everyone not
+  done the pickers start empty, and a date left empty is left as each
+  member has it.
+
+  Each row's Set dates / Change button and the "Set dates for all not done"
+  button in task_status_block.html dispatch it. Saving posts to
+  tasks:member_dates and swaps #task-status-block, which this dialog sits
+  inside, so the swap closes it. A refusal (a deadline in the past, a start
+  after the deadline) comes back as a 400 whose text is shown above the
+  buttons. Remove posts the same form with action=clear (htmx sends the
+  enclosing form's fields with it).
+
+  Expects ``task`` and ``assignee_states``.
+{% endcomment %}
+{% load task_tags %}
+<dialog id="dates-modal-{{ task.pk }}" class="modal"
+        aria-labelledby="dates-modal-title-{{ task.pk }}"
+        data-dates-modal
+        x-data="memberDatesDialog({ taskZone: '{{ task.timezone|escapejs }}', taskStart: {% if task.start_date %}{{ task.start_date|date:'U' }}000{% else %}null{% endif %}, taskDue: {% if task.deadline %}{{ task.deadline|date:'U' }}000{% else %}null{% endif %} })"
+        @open-dates.window="open($event.detail); $el.showModal()">
+  <div class="modal-box">
+    <h3 id="dates-modal-title-{{ task.pk }}" class="text-lg font-semibold text-brand-navy">
+      <span x-show="scope === 'member'">Dates for <span x-text="name"></span></span>
+      <span x-show="scope === 'pending'" x-cloak>Set dates for everyone not done</span>
+    </h3>
+    <p class="mt-3 text-sm text-brand-text">
+      {% if task.start_date or task.deadline %}
+        The task
+        {% if task.start_date %}starts <span class="font-semibold text-brand-navy">{{ task.start_date|in_zone:task.timezone|date:"M j, Y g:i A T" }}</span>{% if task.deadline %} and {% endif %}{% endif %}
+        {% if task.deadline %}is due <span class="font-semibold text-brand-navy">{{ task.deadline|in_zone:task.timezone|date:"M j, Y g:i A T" }}</span>{% endif %},
+        and that still holds for the task.
+      {% else %}
+        The task has no dates of its own.
+      {% endif %}
+      <span x-show="scope === 'member'">A date this member has not been given starts on the task's; change it to give them their own, earlier or later. One left at the task's (or emptied) follows the task.</span>
+      <span x-show="scope === 'pending'" x-cloak>The dates start on the task's. Each member below gets the dates you change, earlier or later than the task's; one left at the task's (or emptied) keeps each member's as it is. Members already done are left alone.</span>
+    </p>
+    <ul class="mt-3 flex flex-col gap-1 text-sm text-brand-navy" x-show="scope === 'pending'" x-cloak data-dates-modal-members>
+      {% for s in assignee_states %}
+        {% if not s.done %}
+          <li class="flex items-center gap-2">
+            <span class="w-5 h-5 rounded-full bg-brand-navy/80 text-white text-[10px] font-semibold inline-flex items-center justify-center shrink-0" aria-hidden="true">{{ s.member.display_name|slice:":1"|upper }}</span>
+            <span>{{ s.member.display_name }}</span>
+            {% if s.individual %}<span class="text-xs text-brand-text/60">(now {% if s.own_start %}starts {{ s.own_start|in_zone:s.start_tz|date:"M j" }}{% if s.own_deadline %}, {% endif %}{% endif %}{% if s.own_deadline %}due {{ s.own_deadline|in_zone:s.deadline_tz|date:"M j" }}{% endif %})</span>{% endif %}
+          </li>
+        {% endif %}
+      {% endfor %}
+    </ul>
+    <form method="post"
+          action="{% url 'tasks:member_dates' pk=task.pk %}"
+          hx-post="{% url 'tasks:member_dates' pk=task.pk %}"
+          hx-vals='{"pane_mode": "1"}'
+          hx-target="#task-status-block"
+          hx-swap="outerHTML"
+          @htmx:response-error.camel="error = $event.detail.xhr.responseText"
+          class="mt-4 flex flex-col gap-3">
+      {% csrf_token %}
+      <input type="hidden" name="scope" :value="scope">
+      <input type="hidden" name="member" :value="member">
+      {# Each date is a day and a time, as on the task form. #}
+      <div class="grid grid-cols-1 gap-3">
+        <div class="flex flex-col gap-1 text-sm">
+          <label for="dates-start-day-{{ task.pk }}" class="font-medium text-brand-navy">Start date</label>
+          <div class="grid grid-cols-[minmax(0,1fr)_8.5rem] gap-2">
+            <input type="date" name="start_date_0" id="dates-start-day-{{ task.pk }}"
+                   class="input input-bordered w-full px-3"
+                   x-model="startDay" @input="dayChanged('start')" @change="dayChanged('start')" data-start-input>
+            <input type="time" name="start_date_1" aria-label="Start time"
+                   class="input input-bordered w-full px-3"
+                   x-model="startTime" @input="startFollows = false" data-start-time-input>
+          </div>
+        </div>
+        <div class="flex flex-col gap-1 text-sm">
+          <label for="dates-due-day-{{ task.pk }}" class="font-medium text-brand-navy">Deadline</label>
+          <div class="grid grid-cols-[minmax(0,1fr)_8.5rem] gap-2">
+            <input type="date" name="deadline_0" id="dates-due-day-{{ task.pk }}"
+                   class="input input-bordered w-full px-3"
+                   x-model="dueDay" @input="dayChanged('due')" @change="dayChanged('due')" data-deadline-input>
+            <input type="time" name="deadline_1" aria-label="Deadline time"
+                   class="input input-bordered w-full px-3"
+                   x-model="dueTime" @input="dueFollows = false" data-deadline-time-input>
+          </div>
+        </div>
+      </div>
+      {% with task_zone_label="Same as task ("|add:task.timezone|add:")" pk_s=task.pk|stringformat:"s" %}
+        {% include "_components/timezone_select.html" with name="timezone" id="dates-timezone-"|add:pk_s managed=True inherit_label=task_zone_label inherit_zone=task.timezone help="The dates above are in this timezone; it applies only to dates set here." %}
+      {% endwith %}
+      <label class="flex flex-col gap-1 text-sm">
+        <span class="font-medium text-brand-navy">Reason <span class="font-normal text-brand-text/60">(optional)</span></span>
+        <input type="text" name="reason" maxlength="500"
+               class="input input-bordered w-full"
+               x-model="reason" placeholder="e.g. Away at a conference">
+      </label>
+      <p class="text-sm text-error" role="alert" x-show="error" x-text="error" x-cloak data-dates-error></p>
+      <div class="flex flex-wrap gap-2 justify-end mt-2">
+        <button type="button" class="btn btn-ghost mr-auto text-error"
+                x-show="scope === 'member' && hasPersonal" x-cloak
+                hx-post="{% url 'tasks:member_dates' pk=task.pk %}"
+                hx-vals='{"pane_mode": "1", "action": "clear"}'
+                hx-target="#task-status-block"
+                hx-swap="outerHTML"
+                data-dates-clear>Remove individual dates</button>
+        <button type="button" class="btn btn-ghost"
+                @click="$el.closest('dialog').close()">Cancel</button>
+        <button type="submit" class="btn bg-brand-coral hover:bg-brand-coral/90 text-white border-0">
+          <span x-show="scope === 'member'">Save dates</span>
+          <span x-show="scope === 'pending'" x-cloak>Set for all not done</span>
+        </button>
+      </div>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

@@ -2,11 +2,32 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Iterable
 
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from django.template.loader import render_to_string
+
+logger = logging.getLogger(__name__)
+
+
+def absolute_url(path: str) -> str:
+    """Prefix ``path`` with ``settings.SITE_URL`` for a link in an email.
+
+    Emails are sent from Celery tasks, where there is no request to build an
+    absolute URI from. An unset ``SITE_URL`` leaves the bare path, which mail
+    clients mangle into a broken link, so it is logged rather than silent.
+    """
+    site = getattr(settings, "SITE_URL", "").rstrip("/")
+    if not site:
+        logger.warning(
+            "SITE_URL is not set — email link for %s will be a bare "
+            "relative path instead of an absolute URL.",
+            path,
+        )
+        return path
+    return f"{site}{path}"
 
 
 def send_templated_email(

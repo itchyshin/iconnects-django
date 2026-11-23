@@ -1,7 +1,7 @@
 Hi,
 
 {{ invitation.added_by }} invited you to join the project
-"{{ project.name }}" on i-connects as {{ invitation.privilege }}.
+"{{ project.name }}" on i-connects as a {{ invitation.get_privilege_display }}.
 
 Accept or decline here:
 {{ url }}

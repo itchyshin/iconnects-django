@@ -34,11 +34,12 @@
             <tbody>
               <tr><td><code>name</code></td><td>Yes</td><td>Task title.</td></tr>
               <tr><td><code>description</code></td><td>No</td><td>Free text.</td></tr>
-              <tr><td><code>deadline</code></td><td>No</td><td><code>YYYY-MM-DD</code> or <code>YYYY-MM-DD HH:MM</code>.</td></tr>
+              <tr><td><code>deadline</code></td><td>No</td><td><code>YYYY-MM-DD</code> (due at 5:00 PM) or <code>YYYY-MM-DD HH:MM</code>.</td></tr>
               <tr><td><code>contribution_type</code></td><td>No</td><td>CRediT value or label. Unknown values fall back to <em>Other</em>.</td></tr>
               <tr><td><code>column</code></td><td>No</td><td>Kanban column name. Created if missing.</td></tr>
               <tr><td><code>assignee_emails</code></td><td>No</td><td>Comma- or semicolon-separated emails. Non-members are skipped.</td></tr>
               <tr><td><code>priority</code></td><td>No</td><td><code>yes</code>/<code>true</code>/<code>1</code> flags the task as high priority.</td></tr>
+              <tr><td><code>timezone</code></td><td>No</td><td>IANA timezone for the row's deadline, e.g. <code>America/Edmonton</code>. Rows without one use the timezone picked below.</td></tr>
             </tbody>
           </table>
         </div>
@@ -60,6 +61,7 @@ Run pilot,Small pilot study,2026-06-15,INVESTIGATION,Doing,alice@test.com,</code
       {% endif %}
 
       {% include "_components/form_field.html" with field=form.csv_file %}
+      {% include "_components/timezone_select.html" with name=form.timezone.html_name id=form.timezone.auto_id saved=form.timezone.value label=form.timezone.label help=form.timezone.help_text errors=form.timezone.errors %}
 
       <div class="flex gap-2 justify-end mt-6">
         <a href="{% url 'tasks:board' project_pk=project.pk %}" class="btn btn-ghost">Cancel</a>

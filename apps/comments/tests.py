@@ -144,12 +144,20 @@ def test_comment_actions_are_text_only(commentable):
 
     own = render_to_string(
         "comments/comment_item.html",
-        {"comment": comment, "task": task, "project_member": member},
+        {"comment": comment, "task": task, "project_member": member, "can_comment": True},
     )
     assert "<svg" not in own
     for label in ("Edit", "Delete"):
         assert f'aria-label="{label} comment"' in own
         assert f">{label}</button>" in own
+
+    # An author who can no longer comment on the task keeps Delete alone.
+    left = render_to_string(
+        "comments/comment_item.html",
+        {"comment": comment, "task": task, "project_member": member, "can_comment": False},
+    )
+    assert ">Delete</button>" in left
+    assert ">Edit</button>" not in left
 
     # A Lead looking at someone else's comment gets Delete alone.
     lead_view = render_to_string(

@@ -53,6 +53,8 @@
       <h2 class="text-lg font-semibold text-brand-navy mb-3">Email Notifications</h2>
       {% include "_components/form_field.html" with field=form.email_project_activity_frequency %}
       {% include "_components/form_field.html" with field=form.email_overdue_task_frequency %}
+      {% include "_components/form_field.html" with field=form.email_task_assigned %}
+      {% include "_components/form_field.html" with field=form.email_comment_mention %}
     </div>
 
     <div class="flex justify-end">

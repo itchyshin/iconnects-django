@@ -2,14 +2,23 @@
   Task create / update form, designed to be embedded inline inside a
   modal via HTMX. For non-HTMX GETs, ``task_form_page.html`` wraps this
   partial in the base layout.
+
+  In the modal, a save the server accepts comes back with an HX-Trigger
+  (task-created / task-updated) and closes it. One it turns down comes back
+  as this form again, with its errors, and is swapped into the still-open
+  modal (#task-modal-body) so nothing typed is lost — the create form's
+  autosave on close handles its own refusals below.
 {% endcomment %}
-<h2 class="text-lg font-semibold text-brand-navy mb-4">{{ form_title|default:"Task" }}</h2>
+<h2 class="text-lg font-semibold text-brand-navy {% if form.instance.pk %}mb-4{% else %}mb-1{% endif %}">{{ form_title|default:"Task" }}</h2>
+{% if not form.instance.pk %}
+  <p class="text-sm text-brand-text/60 mb-4">All tasks are visible to all contributors.</p>
+{% endif %}
 <form method="post"
       action="{{ form_action }}"
       {% if not standalone %}hx-post="{{ form_action }}"
       hx-target="this"
       hx-swap="none"
-      hx-on::after-request="if(event.detail.successful){ document.getElementById('task-modal').close(); var paneUrl=document.getElementById('task-pane-body').dataset.paneUrl; if(paneUrl) htmx.ajax('GET',paneUrl,{target:'#task-pane-body',swap:'innerHTML'}); }"{% endif %}>
+      hx-on::after-request="if (event.detail.successful) { var xhr = event.detail.xhr, modal = document.getElementById('task-modal'); if (xhr.getResponseHeader('HX-Trigger')) { modal.close(); var pane = document.getElementById('task-pane-body'); var paneUrl = pane && pane.dataset.paneUrl; if (paneUrl) htmx.ajax('GET', paneUrl, {target: '#task-pane-body', swap: 'innerHTML'}); } else if (modal.open) { htmx.swap(document.getElementById('task-modal-body'), xhr.responseText, {swapStyle: 'innerHTML'}); } }"{% endif %}>
   {% csrf_token %}
   {% if next_url %}<input type="hidden" name="next" value="{{ next_url }}">{% endif %}
 
@@ -98,8 +107,21 @@
       </div>
     {% endif %}
 
-    {% include "_components/form_field.html" with field=form.start_date %}
-    {% include "_components/form_field.html" with field=form.deadline %}
+    {% include "tasks/partials/date_time_field.html" with field=form.start_date %}
+    {% include "tasks/partials/date_time_field.html" with field=form.deadline %}
+
+    {# The zone the start and due dates are in: the Lead's system timezone for a new task, the saved one when editing. #}
+    <div class="md:col-span-2">
+      {% include "_components/timezone_select.html" with name=form.timezone.html_name id=form.timezone.auto_id saved=form.timezone.value label=form.timezone.label help=form.timezone.help_text errors=form.timezone.errors %}
+    </div>
+
+    {# Members' own start dates / deadlines: what happens to them when the task's date moves. #}
+    {% if form.individual_start_dates %}
+      {% include "tasks/partials/individual_dates_panel.html" with kind="start_date" choice=form.individual_start_dates date_field=form.start_date original=form.original_start_input original_zone=form.original_zone_name rows=form.individual_start_rows noun="start date" %}
+    {% endif %}
+    {% if form.individual_deadlines %}
+      {% include "tasks/partials/individual_dates_panel.html" with kind="deadline" choice=form.individual_deadlines date_field=form.deadline original=form.original_deadline_input original_zone=form.original_zone_name rows=form.individual_deadline_rows noun="deadline" %}
+    {% endif %}
 
     <div class="md:col-span-2">
       {% include "_components/form_field.html" with field=form.assigned_members %}

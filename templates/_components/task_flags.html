@@ -1,10 +1,10 @@
 {# A task's state, as a row of icons — {% include "_components/task_flags.html" with task=task %}. #}
 {# Shared by the browsing views that list tasks as cards or rows (Kanban, List, the Calendar's day #}
-{# list), at the card's or row's end: High priority, Overdue, then the blue check of a task #}
+{# list), at the card's or row's end: High priority, Overdue (or Extended), then the blue check of a task #}
 {# marked completed. Each icon carries its own accessible name and tooltip (A11Y_GUIDE #7), and #}
 {# the row renders nothing when no icon applies. Pass top=True where the row sits beside a name #}
 {# that may wrap (the Kanban card), so the icons stay level with its first line. #}
-{% if task.is_priority or task.is_overdue or task.status == "COMPLETED" %}
+{% if task.is_priority or task.is_past_due or task.status == "COMPLETED" %}
   <span class="flex {% if top %}items-start{% else %}items-center{% endif %} gap-1 shrink-0">
     {% if task.is_priority %}{% include "_components/priority_flag.html" with icon_only=True tooltip=True %}{% endif %}
     {% include "_components/overdue_badge.html" with task=task icon_only=True tooltip=True %}

@@ -1,0 +1,23 @@
+{% extends "emails/base_email.html" %}
+{% load task_tags %}
+{% block title %}New task assignment{% endblock %}
+{% block content %}
+<p>Hi {{ user.name|default:user.email }},</p>
+
+<p>
+  {% if assigned_by %}{{ assigned_by.name|default:assigned_by.email }} assigned you{% else %}You were assigned{% endif %}
+  {% if entries|length == 1 %}a task{% else %}{{ entries|length }} tasks{% endif %} on i-connects:
+</p>
+
+<ul style="padding-left:20px;margin:0 0 16px;">
+  {% for entry in entries %}
+    <li style="margin-bottom:8px;">
+      <a href="{{ entry.url }}" style="color:#1d4ed8;font-weight:600;">{{ entry.task.name }}</a>
+      &mdash; {{ entry.task.project.name }}
+      {% if entry.task.deadline %}<br><span style="color:#6b7280;">Due {{ entry.task.deadline|in_zone:entry.task.timezone|date:"M j, Y g:i A T" }}</span>{% endif %}
+    </li>
+  {% endfor %}
+</ul>
+
+<p>Open {% if entries|length == 1 %}the task{% else %}a task{% endif %} in i-connects to see the details.</p>
+{% endblock %}

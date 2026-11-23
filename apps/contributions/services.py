@@ -1,8 +1,10 @@
 """Service helpers for the contributions ledger.
 
-Closing a task is the ledger event: :func:`record_contributions_for_task`
-writes the credit, :func:`withdraw_contributions_for_task` takes it back when
-the task reopens. The read side (``get_user_contributions``,
+A Lead verifying a member's part is the ledger event:
+:func:`record_member_contribution` writes that member's credit and
+:func:`withdraw_member_contributions` takes it back when the verification,
+or the done mark under it, is withdrawn. Whether the task is open or closed
+plays no part. The read side (``get_user_contributions``,
 ``get_project_contributions``, and the matrix builders) is kept separate so
 the ledger could later be extracted or replaced.
 """
@@ -34,91 +36,131 @@ User = get_user_model()
 def eligible_contributions(task: Task) -> list[tuple[ProjectMember, TaskLog]]:
     """``(assignee, task_log)`` for everyone who has earned credit on ``task``.
 
-    An assignee qualifies once their own current TaskLog says COMPLETED —
-    the mark is theirs to make, so nobody else's click stands in for it. A
-    task that requires review asks one thing more: that submission has to
-    have been signed off, since there the reviewers' verdict is what says the
-    work landed.
+    An assignee qualifies once their current TaskLog is marked COMPLETED and
+    a Lead has verified it. Verification is the Lead's own check on the
+    work, so a review is not asked for on top: a Lead may verify a part the
+    reviewers have not reached.
 
-    Read off the task's *live* assignee and reviewer sets, so a member taken
-    off the task stops qualifying and one added brings an unmarked row with
-    them.
+    Read off the task's *live* assignee set, so a member taken off the task
+    stops qualifying here (credit already written for them stands).
     """
     current: dict[int, TaskLog] = {}
     for log in task.task_logs.all():  # newest-first; first seen is current
         current.setdefault(log.assigned_to_id, log)
 
-    needs_review = task.needs_review
     eligible: list[tuple[ProjectMember, TaskLog]] = []
     for member in task.assigned_members.all():
         log = current.get(member.pk)
         if log is None or log.status != TaskStatus.COMPLETED:
             continue
-        if needs_review and not log.is_reviewed:
+        if not log.is_verified:
             continue
         eligible.append((member, log))
     return eligible
 
 
 @transaction.atomic
-def record_contributions_for_task(
-    task: Task,
+def record_member_contribution(
+    task_log: TaskLog,
     *,
     verifier_user: Optional[User] = None,
 ) -> list[ContributionRecord]:
-    """Write the credit a closed task earned, one row per contributing user.
+    """Write the credit one verified part earned, one row per user behind it.
 
-    Called from ``tasks.services.close_task``. Only projects tracking
-    contributions as CRediT keep a ledger, so this is a no-op elsewhere.
+    Called from ``tasks.services.verify_part`` once a Lead has verified the
+    part. Only projects tracking contributions as CRediT keep a ledger, so
+    this is a no-op elsewhere.
 
-    Idempotent: the ``(task_log, user)`` unique constraint plus
-    ``get_or_create`` means re-closing a task writes no second row.
+    ``verifier_user`` is the Lead who verified it, stored as ``verified_by``;
+    the verification time is stored as ``closed_at``, the moment the credit
+    became final.
 
-    ``verifier_user`` is the lead who closed the task, stored as
-    ``verified_by``. It may be ``None`` when closure came from a code path
-    with no user behind it (a data migration, an admin action) — the FK is
-    nullable for that reason.
+    The credit is filed under the member's effective type
+    (``Task.contribution_type_for``): their own, when a Lead gave them one,
+    else the task's.
+
+    Idempotent: the ``(task, user)`` unique constraint plus ``get_or_create``
+    means verifying twice writes no second row, and a record a Lead entered
+    by hand for the same person is left as it is.
     """
+    task = task_log.task
     if not task.project.tracks_credit:
         return []
-
-    closed_at = timezone.now()
+    when = task_log.verified_at or timezone.now()
+    contribution_type = task.contribution_type_for(task_log.assigned_to)
     created: list[ContributionRecord] = []
-    for member, task_log in eligible_contributions(task):
-        for user in member.users.all():
-            obj, was_created = ContributionRecord.objects.get_or_create(
-                task=task,
-                user=user,
-                defaults=dict(
-                    task_log=task_log,
-                    project=task.project,
-                    contribution_type=task.contribution_type,
-                    verified_by=verifier_user,
-                    closed_at=closed_at,
-                ),
-            )
-            if was_created:
-                created.append(obj)
+    for user in task_log.assigned_to.users.all():
+        obj, was_created = ContributionRecord.objects.get_or_create(
+            task=task,
+            user=user,
+            defaults=dict(
+                task_log=task_log,
+                project=task.project,
+                contribution_type=contribution_type,
+                verified_by=verifier_user,
+                closed_at=when,
+            ),
+        )
+        if was_created:
+            created.append(obj)
     return created
 
 
 @transaction.atomic
-def withdraw_contributions_for_task(task: Task) -> int:
-    """Take back the credit a task's closure wrote, and say how many rows went.
+def withdraw_member_contributions(task: Task, member: ProjectMember) -> int:
+    """Take back the credit one assignee earned on ``task``.
 
-    The mirror of :func:`record_contributions_for_task`, called when a task
-    reopens. Credit is a claim that a piece of work is finished; a reopened
-    task is not, so the claim goes with it rather than standing over work
-    that has been pulled back.
-
-    A record a lead entered by hand stays. It was never derived from the
-    task's state, so the task's state changing says nothing about it —
-    removing it is the lead's own call.
+    Called when a Lead withdraws the verification, or the assignee's done
+    mark under it is undone. Hand-entered records stay: they were never
+    derived from the marks, so a mark changing says nothing about them.
     """
     deleted, _by_model = ContributionRecord.objects.filter(
-        task=task, added_by_hand=False
+        task=task, task_log__assigned_to=member, added_by_hand=False
     ).delete()
     return deleted
+
+
+def sync_contribution_type(task: Task, *, old_type: str) -> int:
+    """Carry a change of the task's contribution type onto its credit.
+
+    Credit can be written while a task is still open and editable, so a Lead
+    changing the type afterwards would otherwise leave verified records filed
+    under the old one. Only records still under ``old_type`` move: one a Lead
+    corrected by hand to another role keeps that correction, and
+    hand-entered records keep their own. Neither does the credit of a member
+    a Lead gave a type of their own: the task's type is not theirs.
+    """
+    if old_type == task.contribution_type:
+        return 0
+    own_type_members = task.assignee_contribution_types.values("member_id")
+    return (
+        ContributionRecord.objects.filter(
+            task=task, added_by_hand=False, contribution_type=old_type
+        )
+        .exclude(task_log__assigned_to__in=own_type_members)
+        .update(contribution_type=task.contribution_type)
+    )
+
+
+def sync_member_contribution_type(
+    task: Task, member: ProjectMember, *, old_type: str, new_type: str
+) -> int:
+    """Carry a change of one member's effective type onto their credit.
+
+    A Lead giving a member a type of their own, changing it, or putting them
+    back on the task's, after their part was already verified would
+    otherwise leave that credit under the old type. As with
+    :func:`sync_contribution_type`, only the automatic records still under
+    ``old_type`` move; hand-entered and hand-corrected ones stay.
+    """
+    if old_type == new_type:
+        return 0
+    return ContributionRecord.objects.filter(
+        task=task,
+        task_log__assigned_to=member,
+        added_by_hand=False,
+        contribution_type=old_type,
+    ).update(contribution_type=new_type)
 
 
 def get_user_contributions(
@@ -167,10 +209,19 @@ def get_contribution_tiles(
     that shape. Feeds ``_components/contribution_card.html`` on both the
     researcher profile and the Contributions module, so the two show the
     same card rather than two views of the same numbers.
+
+    The legacy ``WRITING`` type is no longer a role anyone can be credited
+    with, so it is left off unless this user actually holds credit under
+    it — a zero there is not part of anyone's shape.
     """
     counts = get_user_contribution_counts_by_type(user, project=project)
     labels = dict(ContributionType.choices)
-    return [(labels[v], counts.get(v, 0)) for v in sort_contribution_types(labels)]
+    values = [
+        v
+        for v in sort_contribution_types(labels)
+        if v != ContributionType.WRITING or counts.get(v, 0)
+    ]
+    return [(labels[v], counts.get(v, 0)) for v in values]
 
 
 def get_user_credit_projects(user: User) -> list[Project]:

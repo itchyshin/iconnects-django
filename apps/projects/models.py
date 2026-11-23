@@ -151,6 +151,16 @@ class ProjectPrivilege(models.Model):
         return f"{self.user_id} / {self.project_id} ({self.privilege})"
 
 
+class InvitationQuerySet(models.QuerySet):
+    def addressed_to(self, user):
+        """Invitations meant for ``user`` (see ``Invitation.is_addressed_to``)."""
+        q = models.Q(invited_user_id=user.pk)
+        email = (getattr(user, "email", "") or "").strip()
+        if email:
+            q |= models.Q(invited_user__isnull=True, email__iexact=email)
+        return self.filter(q)
+
+
 class Invitation(models.Model):
     """Outstanding invitation to join a project."""
 
@@ -201,8 +211,25 @@ class Invitation(models.Model):
             models.Index(fields=["email"]),
         ]
 
+    objects = InvitationQuerySet.as_manager()
+
     def __str__(self) -> str:
         return f"Invitation to {self.email} for project {self.project_id}"
+
+    def is_addressed_to(self, user) -> bool:
+        """Whether ``user`` is the person this invitation was sent to.
+
+        An invitation to a picked account belongs to that account only, even
+        if its email address later changes or is reused by someone else. An
+        invitation typed as an email address belongs to whoever holds that
+        address (case-insensitive).
+        """
+        if not getattr(user, "is_authenticated", False):
+            return False
+        if self.invited_user_id is not None:
+            return self.invited_user_id == user.pk
+        email = (user.email or "").strip().lower()
+        return bool(email) and (self.email or "").lower() == email
 
 
 class Element(models.Model):

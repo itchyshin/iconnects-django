@@ -4,11 +4,16 @@
     <span>{{ comment.author.display_name|slice:":1"|upper }}</span>
   </div>
   <form class="flex-1 min-w-0 space-y-2"
+        x-data="mentionBox()"
         hx-post="{% url 'comments:edit' pk=comment.pk %}"
         hx-target="#comment-{{ comment.pk }}"
         hx-swap="outerHTML">
     {% csrf_token %}
-    {{ form.content }}
+    {# The tags already on the comment come in as selected; see mention_list.html. #}
+    <div class="mention-field relative">
+      {{ form.content }}
+      {% include "comments/mention_list.html" %}
+    </div>
     {% comment %}
       Right-aligned, and Cancel before Save: the submit sits at the right edge
       where the Comment button does, so the action does not move when a

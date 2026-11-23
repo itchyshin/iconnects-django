@@ -71,8 +71,8 @@ def test_non_member_does_not_see_tabs_on_public_about(client, user, other_user):
 
 
 @pytest.mark.django_db
-def test_my_projects_cards_link_to_board(client, user):
-    """Opening a project from My Projects lands on the Tasks board."""
+def test_my_projects_cards_link_to_project_page(client, user):
+    """Opening a project from My Projects lands on the Project tab."""
     project = _make_project(user)
     client.force_login(user)
 
@@ -80,7 +80,8 @@ def test_my_projects_cards_link_to_board(client, user):
     content = response.content.decode()
 
     assert response.status_code == 200
-    assert reverse("tasks:board", kwargs={"project_pk": project.pk}) in content
+    assert f'href="{reverse("projects:detail", kwargs={"pk": project.pk})}"' in content
+    assert reverse("tasks:board", kwargs={"project_pk": project.pk}) not in content
 
 
 @pytest.mark.django_db

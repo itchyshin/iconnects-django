@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import override_settings
@@ -69,58 +71,6 @@ def test_my_list_htmx_search_returns_results_partial_only(client, user):
     # The partial doesn't re-render the page shell (sidebar, filter form, etc.).
     assert 'id="filter-form-my"' not in content
     assert 'aria-label="Sidebar navigation"' not in content
-
-
-@pytest.mark.django_db
-def test_my_list_shows_open_due_and_join_request_counts(client, user, other_user):
-    from datetime import timedelta
-
-    from django.utils import timezone
-
-    from apps.projects.models import ProjectMember
-    from apps.tasks.models import KanbanBoard, Task
-
-    project = create_project_with_owner(
-        user=user,
-        form_data={"name": "Counted", "status": ProjectStatus.ACTIVE, "is_public": True},
-    )
-    column = KanbanBoard.objects.filter(project=project).first()
-    member = ProjectMember.objects.filter(project=project, users=user).first()
-
-    Task.objects.create(
-        project=project,
-        created_by=member,
-        container=column,
-        container_task_order=0,
-        name="Open task",
-    )
-    Task.objects.create(
-        project=project,
-        created_by=member,
-        container=column,
-        container_task_order=1,
-        name="Overdue task",
-        deadline=timezone.now() - timedelta(days=1),
-    )
-    Task.objects.create(
-        project=project,
-        created_by=member,
-        container=column,
-        container_task_order=2,
-        name="Completed task",
-        status=TaskStatus.COMPLETED,
-        deadline=timezone.now() - timedelta(days=1),
-    )
-    create_join_request(project=project, user=other_user, requested_privilege="CONTRIBUTOR")
-
-    client.force_login(user)
-    response = client.get(reverse("projects:my_list"))
-    content = response.content.decode()
-
-    assert response.status_code == 200
-    assert "2 open tasks" in content
-    assert "1 task overdue" in content
-    assert "1 join request" in content
 
 
 @pytest.mark.django_db
@@ -274,6 +224,71 @@ def test_resend_invitation_regenerates_code_and_resends_email(user):
     ).exists()
 
 
+# ---------------------------------------------------------------------------
+# Invitations show the privilege label (Lead / Member), not the stored value
+# ---------------------------------------------------------------------------
+
+PRIVILEGE_LABELS = [
+    (MemberPrivileges.CONTRIBUTOR, "Member"),
+    (MemberPrivileges.PROJECT_MANAGER, "Lead"),
+]
+
+
+def _invite(user, privilege, **kwargs):
+    project = create_project_with_owner(
+        user=user,
+        form_data={"name": "Labels", "status": ProjectStatus.ACTIVE, "is_public": True},
+    )
+    return create_invitation(project=project, privilege=privilege, added_by="Alice", **kwargs)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("privilege,label", PRIVILEGE_LABELS)
+def test_invitation_email_names_the_privilege_label(user, privilege, label):
+    from django.core import mail
+
+    mail.outbox.clear()
+    _invite(user, privilege, email="new@test.com")
+
+    assert len(mail.outbox) == 1
+    message = mail.outbox[0]
+    html = message.alternatives[0][0]
+    assert f"on i-connects as a {label}." in message.body
+    assert f"as\n  a <em>{label}</em>." in html
+    for body in (message.body, html):
+        assert privilege.value not in body
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("privilege,label", PRIVILEGE_LABELS)
+def test_invitation_accept_page_names_the_privilege_label(client, user, other_user, privilege, label):
+    invitation = _invite(user, privilege, invited_user=other_user)
+    client.force_login(other_user)
+
+    response = client.get(
+        reverse("projects:accept_or_decline", kwargs={"code": invitation.invitation_code})
+    )
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert f"\n        {label}\n      </span>" in content
+    assert f">\n        {privilege.value}\n" not in content
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("privilege,label", PRIVILEGE_LABELS)
+def test_my_invitations_list_names_the_privilege_label(client, user, other_user, privilege, label):
+    _invite(user, privilege, invited_user=other_user)
+    client.force_login(other_user)
+
+    response = client.get(reverse("projects:my_invitations"))
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert f"\n                  {label}\n                </span>" in content
+    assert f">\n                  {privilege.value}\n" not in content
+
+
 @pytest.mark.django_db
 def test_resend_invitation_view_requires_project_manager(client, user, other_user):
     project = _make_project(user)
@@ -320,25 +335,142 @@ def test_resend_invitation_view_redirects_pm_to_invitation_list(client_logged_in
     )
 
 
-@pytest.mark.django_db
-def test_project_form_saves_discord_webhook_url(client_logged_in, user):
-    webhook = "https://discord.com/api/webhooks/1/abc"
-    response = client_logged_in.post(
-        reverse("projects:create"),
-        {
-            "name": "Webhook Project",
-            "description": "",
-            "abstract": "",
-            "keywords": "",
-            "status": ProjectStatus.PLANNING,
-            "is_public": "on",
-            "public_summary": "",
-            "discord_webhook_url": webhook,
+# ---------------------------------------------------------------------------
+# Only the invitee may open or act on an invitation link
+# ---------------------------------------------------------------------------
+
+
+def _make_user(email, name):
+    from django.utils import timezone
+
+    return get_user_model().objects.create_user(
+        email=email,
+        username=f"{name.lower().replace(' ', '-')}-{email}",
+        password="password123",
+        name=name,
+        email_confirmed_at=timezone.now(),
+    )
+
+
+def _private_invite(owner, **kwargs):
+    project = create_project_with_owner(
+        user=owner,
+        form_data={
+            "name": "Secret Seagrass",
+            "abstract": "Unpublished eelgrass sites.",
+            "status": ProjectStatus.ACTIVE,
+            "is_public": False,
         },
     )
-    assert response.status_code in (301, 302)
-    project = Project.objects.get(name="Webhook Project")
-    assert project.discord_webhook_url == webhook
+    return create_invitation(
+        project=project, privilege=MemberPrivileges.PROJECT_MANAGER, added_by="Alice", **kwargs
+    )
+
+
+def _invite_url(invitation):
+    return reverse("projects:accept_or_decline", kwargs={"code": invitation.invitation_code})
+
+
+@pytest.mark.django_db
+def test_invitation_link_hidden_from_another_signed_in_user(client, user, other_user):
+    invitation = _private_invite(user, invited_user=other_user)
+    stranger = _make_user("carol@test.com", "Carol")
+    client.force_login(stranger)
+
+    response = client.get(_invite_url(invitation))
+
+    assert response.status_code == 403
+    assert "invites/wrong_account.html" in [t.name for t in response.templates]
+    content = response.content.decode()
+    for secret in ("Secret Seagrass", "Unpublished eelgrass sites.", "Lead", other_user.email):
+        assert secret not in content
+    assert "Accept invitation" not in content
+    assert "carol@test.com" in content  # who is signed in, so they know why
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("action", ["accept", "decline"])
+def test_another_signed_in_user_cannot_accept_or_decline(client, user, other_user, action):
+    invitation = _private_invite(user, invited_user=other_user)
+    stranger = _make_user("carol@test.com", "Carol")
+    client.force_login(stranger)
+
+    response = client.post(_invite_url(invitation), {"action": action})
+
+    assert response.status_code == 403
+    assert Invitation.objects.filter(pk=invitation.pk).exists()
+    assert not ProjectMember.objects.filter(project=invitation.project, users=stranger).exists()
+
+
+@pytest.mark.django_db
+def test_invitee_matched_by_email_in_any_case(client, user, other_user):
+    invitation = _private_invite(user, email=other_user.email.upper())
+    client.force_login(other_user)
+
+    assert client.get(_invite_url(invitation)).status_code == 200
+    response = client.post(_invite_url(invitation), {"action": "accept"})
+
+    assert response.status_code == 302
+    assert ProjectMember.objects.filter(project=invitation.project, users=other_user).exists()
+
+
+@pytest.mark.django_db
+def test_picked_invitee_keeps_invitation_after_changing_email(client, user, other_user):
+    """An invitation to a picked account follows the account, not its address."""
+    invitation = _private_invite(user, invited_user=other_user)
+    other_user.email = "bob.new@test.com"
+    other_user.save(update_fields=["email"])
+    client.force_login(other_user)
+
+    response = client.get(_invite_url(invitation))
+    assert response.status_code == 200
+    assert "Secret Seagrass" in response.content.decode()
+    assert Invitation.objects.addressed_to(other_user).filter(pk=invitation.pk).exists()
+    client.post(_invite_url(invitation), {"action": "accept"})
+    assert ProjectMember.objects.filter(project=invitation.project, users=other_user).exists()
+
+
+@pytest.mark.django_db
+def test_new_holder_of_a_picked_invitees_old_email_is_not_the_invitee(client, user, other_user):
+    invitation = _private_invite(user, invited_user=other_user)
+    old_email = other_user.email
+    other_user.email = "bob.new@test.com"
+    other_user.save(update_fields=["email"])
+    newcomer = _make_user(old_email, "Not Bob")
+    client.force_login(newcomer)
+
+    assert client.get(_invite_url(invitation)).status_code == 403
+    assert not Invitation.objects.addressed_to(newcomer).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("known_code", [True, False])
+def test_signed_out_visitor_is_sent_to_sign_in_for_any_code(client, user, other_user, known_code):
+    if known_code:
+        url = _invite_url(_private_invite(user, invited_user=other_user))
+    else:
+        url = reverse("projects:accept_or_decline", kwargs={"code": "no-such-code"})
+
+    for response in (client.get(url), client.post(url, {"action": "accept"})):
+        assert response.status_code == 302
+        assert response["Location"].startswith(reverse("accounts:login") + "?next=")
+
+
+@pytest.mark.django_db
+def test_sign_out_and_continue_returns_to_the_invitation(client, user, other_user):
+    from urllib.parse import parse_qs, urlparse
+
+    invitation = _private_invite(user, invited_user=other_user)
+    client.force_login(_make_user("carol@test.com", "Carol"))
+    page = client.get(_invite_url(invitation)).content.decode()
+    next_value = re.search(r'name="next" value="([^"]+)"', page).group(1).replace("&amp;", "&")
+
+    response = client.post(reverse("accounts:logout"), {"next": next_value})
+
+    assert "_auth_user_id" not in client.session
+    location = urlparse(response["Location"])
+    assert location.path == reverse("accounts:login")
+    assert parse_qs(location.query)["next"] == [_invite_url(invitation)]
 
 
 @pytest.mark.django_db
@@ -631,8 +763,10 @@ def test_detail_shows_request_to_join_button_for_non_members(client, user, other
     response = client.get(reverse("projects:detail", kwargs={"pk": project.pk}))
     assert response.status_code == 200
     content = response.content.decode()
-    assert "Request to join as member" in content
-    assert "Request to join as lead" in content
+    # The modal the button opens asks which privilege (Lead or Member) to
+    # request, so the button itself names none.
+    assert "Request to join" in content
+    assert "contributor" not in content.lower().split("request to join", 1)[1][:40]
 
 
 # ---------------------------------------------------------------------------
@@ -878,7 +1012,7 @@ def test_members_page_disables_self_controls_for_last_pm(client, user):
     response = client.get(reverse("projects:members", kwargs={"pk": project.pk}))
     assert response.status_code == 200
     content = response.content.decode()
-    assert "A project must always have at least one Project Manager." in content
+    assert "A project must always have at least one Lead." in content
 
 
 @pytest.mark.django_db
@@ -1631,9 +1765,9 @@ def test_summary_reports_activity(client, user, other_user):
 
 
 @pytest.mark.django_db
-def test_summary_activity_lists_reviews_and_a_task_its_reviews_finished(client, user, other_user):
+def test_summary_activity_lists_reviews_verifications_and_who_completed(client, user, other_user):
     from apps.tasks.models import KanbanBoard, Task
-    from apps.tasks.services import close_task, mark_own_done, mark_reviewed
+    from apps.tasks.services import close_task, mark_own_done, mark_reviewed, verify_part
 
     project = _make_project(user)
     lead = ProjectMember.objects.filter(project=project, users=user).first()  # Alice
@@ -1664,31 +1798,27 @@ def test_summary_activity_lists_reviews_and_a_task_its_reviews_finished(client, 
     url = reverse("projects:detail", kwargs={"pk": project.pk})
     client.force_login(user)
 
-    # One of two parts reviewed: a review line, and the task is still open.
+    # Every part reviewed: a review line each, and the task stays open — only
+    # a Lead completes a task.
     mark_reviewed(task_log=bob_log, reviewer=lead)
-    activity = client.get(url).context["summary"]["activity"]
-    assert ("Alice", "reviewed Bob's part on", "Reviewed one") in [
-        (e["who"], e["verb"], e["task"].name) for e in activity if e["kind"] == "task"
-    ]
-    assert not any(e.get("after") for e in activity)
-
-    # The last sign-off finishes the task: its own line, above the review,
-    # and no "Alice completed" as though a lead had closed it by hand.
     mark_reviewed(task_log=carol_log, reviewer=lead)
+    reviewed.refresh_from_db()
+    assert reviewed.status == "NOT_COMPLETED"
+
+    verify_part(task_log=bob_log, lead=lead)
     response = client.get(url)
     lines = [
-        (e["who"], e["verb"], e["task"].name, e.get("after", ""))
+        (e["who"], e["verb"], e["task"].name)
         for e in response.context["summary"]["activity"] if e["kind"] == "task"
     ]
-    assert lines[0] == ("", "", "Reviewed one", "was marked done: every part reviewed")
-    assert lines[1] == ("Alice", "reviewed Carol's part on", "Reviewed one", "")
-    assert ("Alice", "completed", "Reviewed one", "") not in lines
-    # A task a lead closed by hand still reads as theirs.
-    assert ("Alice", "completed", "Closed by hand", "") in lines
+    assert lines[0] == ("Alice", "verified Bob's part on", "Reviewed one")
+    assert ("Alice", "reviewed Carol's part on", "Reviewed one") in lines
+    assert ("Alice", "completed", "Reviewed one") not in lines
+    assert ("Alice", "completed", "Closed by hand") in lines
 
     body = response.content.decode()
+    assert "verified Bob&#x27;s part on" in body
     assert "reviewed Bob&#x27;s part on" in body
-    assert "was marked done: every part reviewed" in body
 
 
 @pytest.mark.django_db

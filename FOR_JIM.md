@@ -50,13 +50,22 @@ A project picks how contributions are attributed when it is created —
 project every task carries a **task type**, one of CRediT's 14 contributor
 roles.
 
-Closing a task is the ledger event. When a project lead completes it, a
-`ContributionRecord` is written for each assignee who marked their own part
-done; where the task carries reviewers, only for submissions a reviewer
-signed off. Reopening the task withdraws that credit again, and closing it
-writes it back. A completed task is frozen while it stands completed —
-editing it, deleting it, changing its assignees or its milestone are all
-refused until a lead marks it not complete.
+A lead verifying a member's part is the ledger event. Each task's
+Completion table has a **Verified** column beside Done and Reviewed: a lead
+ticks it for one member, or uses **Verify all marked done** (or **Verify all
+marked reviewed**) under the progress bars, and a `ContributionRecord` is written for that
+member. A part must be marked done to be verified; a review is not required.
+Withdrawing the verification, or the assignee undoing their done mark,
+takes that credit back. Closing and reopening the task write and withdraw
+nothing.
+
+Marking completed is a lead's action — tasks no longer complete themselves
+when the last part is reviewed — and it does not stop the work around it:
+assignees can still mark or unmark their own part, reviewers can still
+review, and leads can still verify. What a completed task freezes is the
+task itself (editing it, deleting it, changing its assignees or its
+milestone) and a lead setting or clearing someone else's done mark, until a
+lead marks it not complete.
 
 Review is opt-in per task: tick **Require review** on the task form and the
 Reviewers field appears (it asks for at least one). A task with no reviewers
@@ -65,8 +74,8 @@ has no Reviewed column and no review actions at all.
 The ledger is correctable. A lead can change the role a contribution was
 recorded under, withdraw one, or enter one by hand for work the automatic
 writer passed over — a person who did the task without ever being an
-assignee. Hand-entered rows are marked as such, and survive the task being
-reopened. Every correction is audit-logged.
+assignee. Hand-entered rows are marked as such, and survive verifications
+being withdrawn. Every correction is audit-logged.
 
 Two pages show it:
 - **Contribution Tracking** on the project (`/projects/<id>/contribution-tracking/`)
@@ -74,8 +83,8 @@ Two pages show it:
   switches Kanban / List / Calendar: **Contributions by member** (a grid of
   every member against all 14 CRediT roles, sortable by any column and with
   a filter to narrow it to the roles and members that have contributions)
-  and **Every contribution** (one row per record, naming its task and who
-  closed it). Visible to every project member.
+  and **Every contribution** (one row per record, naming its task and the
+  lead who verified it). Visible to every project member.
 - **Contributions** in the sidebar (`/contributions/`) — your own credit
   across every project, filterable by project.
 
@@ -292,7 +301,8 @@ reachable only by URL today.
    - Add a kanban column, then create a task; note the "Task type" select,
      offering CRediT's 14 roles (it appears only on a CRediT project), and
      the "Require review" tickbox that reveals the Reviewers field.
-   - Assign yourself, mark your own part done, then close the task as lead.
+   - Assign yourself, mark your own part done, tick Verified on your row
+     (or Verify all marked done), then close the task as lead.
    - With the task completed, Edit and Delete are gone and the header names
      who closed it and when; Mark Not Complete brings the buttons back and
      takes the attribution away.
@@ -303,8 +313,9 @@ reachable only by URL today.
      column header to sort by it (click again to flip the direction).
    - Switch to Every contribution and click "Edit" on that row to correct its
      role, or "Add contribution" to credit someone the ledger missed.
-   - Reopen the task from its detail view and reload — the earned credit is
-     gone; close it again and it is back.
+   - Untick Verified on the task's Completion table and reload — the earned
+     credit is gone; tick it again and it is back. Reopening the task leaves
+     it alone.
    - Download "Matrix (CSV)" and "List (CSV)" from the same page.
    - Open **Contributions** in the sidebar — the same credit from your side,
      filterable by project, with both downloads carrying the filter.

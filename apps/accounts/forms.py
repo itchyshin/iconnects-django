@@ -318,6 +318,8 @@ class ProfileForm(forms.ModelForm):
             # Email notifications
             "email_project_activity_frequency",
             "email_overdue_task_frequency",
+            "email_task_assigned",
+            "email_comment_mention",
         ]
         labels = {
             "given_name": "Given name",
@@ -329,6 +331,8 @@ class ProfileForm(forms.ModelForm):
             "institution": "Institution / Employer",
             "city": "City",
             "country": "Country",
+            "email_task_assigned": "Email me when I'm assigned a task",
+            "email_comment_mention": "Email me when I'm mentioned in a comment",
         }
         widgets = {
             "given_name": forms.TextInput(attrs={"class": "input input-bordered w-full"}),
@@ -353,6 +357,12 @@ class ProfileForm(forms.ModelForm):
             ),
             "email_overdue_task_frequency": forms.Select(
                 attrs={"class": "select select-bordered w-full"}
+            ),
+            "email_task_assigned": forms.CheckboxInput(
+                attrs={"class": "toggle toggle-sm toggle-primary"}
+            ),
+            "email_comment_mention": forms.CheckboxInput(
+                attrs={"class": "toggle toggle-sm toggle-primary"}
             ),
         }
 

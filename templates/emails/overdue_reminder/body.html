@@ -1,4 +1,5 @@
 {% extends "emails/base_email.html" %}
+{% load task_tags %}
 {% block title %}Overdue task reminder{% endblock %}
 {% block content %}
 <p>Hi {{ user.name|default:user.email }},</p>
@@ -10,7 +11,7 @@
     <li>
       <strong>{{ task.name }}</strong>
       {% if task.project %} &mdash; {{ task.project.name }}{% endif %}
-      {% if task.deadline %} (due {{ task.deadline|date:"M j, Y" }}){% endif %}
+      {% if task.deadline %} (due {{ task.deadline|in_zone:task.timezone|date:"M j, Y" }}){% endif %}
     </li>
   {% endfor %}
 </ul>

@@ -1,0 +1,38 @@
+{% comment %}
+  The Verified tick box of one completion-table row — ticked once a Lead has
+  verified the member's contribution, which is what credits them for it.
+  Ticking verifies; unticking withdraws the verification and its credit.
+  Expects ``s`` (one entry of views._task_status_context's assignee_states)
+  and ``task``; it swaps #task-status-block.
+
+  Leads only, and open whether or not the task is completed: a part can be
+  verified once it is marked done (``s.can_verify``), reviewed or not, and a
+  verification can be withdrawn while it stands (``s.can_unverify``).
+  Everyone else sees it read-only.
+{% endcomment %}
+{% if s.verified %}
+  {% if s.can_unverify %}
+    <input type="checkbox" class="completion-tick completion-tick-verify" checked
+           hx-post="{% url 'tasks:verify_log' pk=task.pk log_pk=s.log.pk %}"
+           hx-vals='{"verified": "0", "pane_mode": "1"}'
+           hx-target="#task-status-block"
+           hx-swap="outerHTML"
+           aria-label="Withdraw the verification of {% if s.is_viewer %}your{% else %}{{ s.member.display_name }}'s{% endif %} contribution"
+           title="Untick to withdraw">
+  {% else %}
+    <input type="checkbox" class="completion-tick completion-tick-verify" disabled checked
+           aria-label="{{ s.member.display_name }}: verified">
+  {% endif %}
+{% elif s.can_verify and s.log %}
+  <input type="checkbox" class="completion-tick completion-tick-verify"
+         hx-post="{% url 'tasks:verify_log' pk=task.pk log_pk=s.log.pk %}"
+         hx-vals='{"verified": "1", "pane_mode": "1"}'
+         hx-target="#task-status-block"
+         hx-swap="outerHTML"
+         aria-label="Verify {% if s.is_viewer %}your{% else %}{{ s.member.display_name }}'s{% endif %} contribution"
+         title="Tick to verify">
+{% else %}
+  <input type="checkbox" class="completion-tick completion-tick-verify" disabled
+         aria-label="{{ s.member.display_name }}: {% if s.done %}awaiting verification{% else %}not verified{% endif %}"
+         {% if not s.done %}title="Can be verified once the part is done"{% endif %}>
+{% endif %}

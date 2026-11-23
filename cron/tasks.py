@@ -66,25 +66,36 @@ def weekly_digest_cron() -> int:
 def overdue_task_reminder_cron() -> int:
     """Email reminders for overdue tasks.
 
-    Finds all ``NOT_COMPLETED`` tasks with a deadline in the past, collects
-    the set of assigned users (via ``assigned_members.users``), and enqueues
-    a digest-style email for each user whose ``email_overdue_task_frequency``
-    is not ``NEVER``. The digest task does the actual rendering/sending.
+    Finds every assignment on a ``NOT_COMPLETED`` task whose member is past
+    *their* deadline -- their individual one where a Lead set it, else the
+    task's -- collects those members' users, and enqueues a digest-style
+    email for each user whose ``email_overdue_task_frequency`` is not
+    ``NEVER``. A member whose individual deadline is still to come is not
+    reminded, though the task's own deadline has passed. The digest task does
+    the actual rendering/sending.
     """
+    from django.db.models import OuterRef, Subquery
+    from django.db.models.functions import Coalesce
+
     from apps.notifications.tasks import send_digest_email_task
-    from apps.tasks.models import Task
+    from apps.tasks.models import AssigneeDeadline, Task
 
     User = get_user_model()
     now = timezone.now()
 
-    overdue = Task.objects.filter(
-        deadline__lt=now,
-        status=TaskStatus.NOT_COMPLETED,
+    personal = AssigneeDeadline.objects.filter(
+        task_id=OuterRef("task_id"), member_id=OuterRef("projectmember_id")
+    ).values("deadline")[:1]
+    overdue_member_ids = (
+        Task.assigned_members.through.objects.exclude(
+            task__status=TaskStatus.COMPLETED
+        )
+        .annotate(due=Coalesce(Subquery(personal), "task__deadline"))
+        .filter(due__lt=now)
+        .values("projectmember_id")
     )
     user_ids = (
-        User.objects.filter(
-            project_memberships__assigned_tasks__in=overdue,
-        )
+        User.objects.filter(project_memberships__in=overdue_member_ids)
         .exclude(email_overdue_task_frequency=EmailFrequency.NEVER)
         .filter(is_active=True)
         .values_list("id", flat=True)

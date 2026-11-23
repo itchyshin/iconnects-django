@@ -178,6 +178,56 @@
       border-bottom-color: transparent;
       border-left-color: #1e293b;
     }
+
+    /* Tagged people in comments (window.mentionBox, comment_tags.comment_body).
+       One look in the box while typing and in the posted comment: a pale
+       brand-blue chip. Its sides are widened with box-shadows, not padding,
+       so the chip takes no room and the text around it wraps exactly as
+       typed; not its top and bottom, which would bleed past a comment
+       clamped behind See more. */
+    .comment-mention {
+      color: #323895;
+      font-weight: 500;
+      background-color: #e1e8f6;
+      border-radius: 4px;
+      box-shadow: 2px 0 0 #e1e8f6, -2px 0 0 #e1e8f6;
+    }
+    /* A posted tag links to the person's profile: coral on hover, like the
+       other name links in the app. */
+    a.comment-mention:hover { color: #f03d30; }
+    /* The layer behind a comment box. It holds the same text, laid out the
+       same way, but invisible: only its chips show, through the textarea,
+       whose own background is made transparent. */
+    .mention-backdrop {
+      position: absolute;
+      overflow: hidden;
+      pointer-events: none;
+      white-space: pre-wrap;
+      overflow-wrap: break-word;
+      color: transparent;
+      /* The box's own background (DaisyUI's base-100), which it gives up to
+         let the marks show through. Set here rather than read off the box,
+         which can be mid-swap when the layer is built (see below). */
+      background-color: var(--fallback-b1, oklch(var(--b1) / 1));
+    }
+    .mention-backdrop mark {
+      color: transparent;
+      background-color: #d6e0f3;
+      border-radius: 4px;
+      box-shadow: 2px 0 0 #d6e0f3, -2px 0 0 #d6e0f3;
+    }
+    /* Keyed off the box's wrapper, a class the server renders, and never off
+       a class added to the textarea. The textarea has an id (id_content), and
+       when HTMX swaps a pane over an older one holding the same id, it gives
+       the new textarea the old one's attributes and resets them to the
+       server's ~20ms later — wiping anything script added in between. A lost
+       class left the layer painted over the box: a blank white panel where
+       the comment box should be. */
+    .mention-field textarea {
+      position: relative;
+      z-index: 1;
+      background-color: transparent !important;
+    }
   </style>
 
   {% comment %}
@@ -199,6 +249,314 @@
         " " +
         at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })
       );
+    };
+  </script>
+
+  {% comment %}
+    Timezone picker (_components/timezone_select.html): a search box for a
+    city or country over a native <select>, which stays the field the form
+    submits. It starts on the user's system timezone unless a zone is
+    already saved. ``saved`` is the saved zone, null when there is none
+    (start on the system's), or undefined when the enclosing dialog calls
+    apply() itself each time it opens. A system zone the list lacks is
+    looked up in the select's alias map (old names such as Asia/Calcutta);
+    failing that it is added to the list under its own name, since the
+    server accepts any zone the tz database knows.
+
+    Search matches every word typed against the start of a word in the
+    entry's city, country (and its code and other names), zone name, note,
+    abbreviation or offset, ignoring case and accents. Entries whose city
+    starts with what was typed come first, then those with a word that is
+    exactly it (a country code or other name such as "UK", an abbreviation
+    such as "MST"), then those whose country starts with it; each group
+    keeps the list's order, by offset.
+  {% endcomment %}
+  <script>
+    window.systemTimezone = function () {
+      try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) { return ""; }
+    };
+    // The picker's list of zones, fetched once per page and shared.
+    window.timezoneList = function (url) {
+      if (!window._timezoneList) {
+        window._timezoneList = fetch(url, { credentials: "same-origin" })
+          .then(function (r) { return r.ok ? r.json() : { options: [] }; })
+          .then(function (data) { return data.options || []; })
+          .catch(function () { window._timezoneList = null; return []; });
+      }
+      return window._timezoneList;
+    };
+    window.timezoneSelect = function (saved) {
+      var fold = function (text) {
+        return String(text || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+      };
+      var words = function (text) { return fold(text).split(/[\s,/()·]+/).filter(Boolean); };
+      var entry = function (o) {
+        var label = o.label || o.display || o.value;
+        return {
+          value: o.value,
+          label: label,
+          offset: o.offset || "",
+          display: o.display || label,
+          detail: o.detail || "",
+          city: fold(label.split(",")[0]),
+          country: fold(label.split(",").slice(1).join(",")).trim(),
+          words: words([label, o.search, o.value].join(" ")),
+        };
+      };
+      return {
+        ready: false,
+        open: false,
+        loading: true,
+        query: "",
+        active: 0,
+        options: [],
+        value: "",
+        display: "",
+        systemZone: "",
+        systemMatch: "",
+        note: "",
+        init: function () {
+          var self = this, select = this.$refs.select;
+          this.systemZone = window.systemTimezone();
+          this.systemMatch = this.canonical(this.systemZone);
+          // Until the list loads, offer what the select already holds.
+          this.options = Array.prototype.map.call(select.options, function (o) {
+            return entry({ value: o.value, label: o.dataset.display || o.textContent, display: o.dataset.display || o.textContent });
+          });
+          this.ready = true;
+          if (saved !== undefined) this.apply(saved); else this.refresh();
+          window.timezoneList(select.dataset.tzUrl).then(function (list) {
+            var local = self.options.filter(function (o) { return o.value === ""; });
+            self.options = local.concat(list.map(entry));
+            self.loading = false;
+            // A system zone the server's list does not know is not offered:
+            // if it was put in as the default, fall back to the server's.
+            if (list.length && self.systemMatch && !self.find(self.systemMatch)) {
+              var unknown = self.systemMatch;
+              self.systemMatch = "";
+              if (select.value === unknown) {
+                select.remove(select.selectedIndex);
+                select.selectedIndex = 0;
+                select.dispatchEvent(new Event("change", { bubbles: true }));
+              }
+            }
+            // The saved or system zone, labelled as the list labels it.
+            Array.prototype.forEach.call(select.options, function (o) {
+              var known = self.find(o.value);
+              if (o.value && known) { o.textContent = known.display; o.dataset.display = known.display; }
+            });
+            self.refresh();
+          });
+        },
+        find: function (value) {
+          for (var i = 0; i < this.options.length; i++) if (this.options[i].value === value) return this.options[i];
+          return null;
+        },
+        // ``zone`` under the name the list uses (old names such as
+        // Asia/Calcutta through the alias map), or "" for no real place.
+        canonical: function (zone) {
+          if (!zone || /^Etc\//.test(zone) || !/^[A-Za-z]+\/[A-Za-z0-9_+\-\/]+$/.test(zone)) return "";
+          var aliases = {};
+          try { aliases = JSON.parse(this.$refs.select.dataset.tzAliases || "{}"); } catch (e) {}
+          return aliases[zone] || zone;
+        },
+        // Make sure the select can hold ``value`` (a zone from the list).
+        ensure: function (value) {
+          var select = this.$refs.select;
+          if (value === null || value === undefined) return;
+          for (var j = 0; j < select.options.length; j++) if (select.options[j].value === value) return;
+          var known = this.find(value), text = known ? known.display : value.replace(/_/g, " ");
+          var option = new Option(text, value);
+          option.dataset.display = text;
+          select.add(option);
+        },
+        apply: function (value) {
+          var select = this.$refs.select;
+          if (value === null || value === undefined) value = this.systemMatch || null;
+          if (value !== null) {
+            this.ensure(value);
+            select.value = value;
+          }
+          this.refresh();
+          // Tell listeners outside the picker (the task form's individual
+          // dates panel) the zone may have changed.
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+        },
+        refresh: function () {
+          var select = this.$refs.select, current = select.options[select.selectedIndex];
+          this.value = select.value;
+          this.display = current ? (current.dataset.display || current.textContent) : "";
+          this.note = this.describe(select, current);
+        },
+        // "Timezone used: …", naming where it came from.
+        describe: function (select, current) {
+          var name = function (o, value) { return o ? o.display : value.replace(/_/g, " "); };
+          var system = this.systemMatch;
+          if (!select.value) {
+            if (current && current.dataset.inheritZone) {
+              return "Timezone used: the task's, " + current.dataset.inheritZone.replace(/_/g, " ") + ".";
+            }
+            return "Timezone used: the server's, " + (select.dataset.serverZone || "UTC").replace(/_/g, " ") +
+              (system ? "." : " \u2014 your system timezone could not be read.");
+          }
+          var used = "Timezone used: " + name(this.find(select.value), select.value);
+          if (system && select.value === system) return used + " \u2014 your system timezone.";
+          if (system) return used + ". Your system timezone is " + name(this.find(system), system) + ".";
+          return used + ".";
+        },
+        get results() {
+          var terms = words(this.query);
+          if (!terms.length) return this.options;
+          var q = fold(this.query.trim());
+          var hits = this.options.filter(function (o) {
+            return terms.every(function (t) {
+              return o.words.some(function (w) { return w.indexOf(t) === 0; });
+            });
+          });
+          // City first, then a word matched whole (a country's code or
+          // other name, "UK"; an abbreviation, "MST"), then the country.
+          var rank = function (o) {
+            if (o.city.indexOf(q) === 0) return 0;
+            if (o.words.indexOf(q) !== -1) return 1;
+            if (o.country.indexOf(q) === 0) return 2;
+            return 3;
+          };
+          return hits
+            .map(function (o, i) { return [rank(o), i, o]; })
+            .sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; })
+            .map(function (x) { return x[2]; });
+        },
+        toggle: function () { this.open ? this.close() : this.show(); },
+        show: function () {
+          this.open = true;
+          this.query = "";
+          var self = this;
+          this.active = Math.max(0, this.results.findIndex(function (o) { return o.value === self.value; }));
+          this.$nextTick(function () {
+            self.$refs.search.focus();
+            self.scrollActive();
+          });
+        },
+        close: function () { this.open = false; },
+        move: function (step) {
+          var n = this.results.length;
+          if (!n) return;
+          this.active = (this.active + step + n) % n;
+          this.scrollActive();
+        },
+        scrollActive: function () {
+          var self = this;
+          this.$nextTick(function () {
+            var item = self.$refs.list && self.$refs.list.querySelectorAll("[role=option]")[self.active];
+            if (item && item.scrollIntoView) item.scrollIntoView({ block: "nearest" });
+          });
+        },
+        pick: function (option) {
+          if (!option) return;
+          this.apply(option.value);
+          this.close();
+          var button = this.$root.querySelector("[data-timezone-button]");
+          if (button) button.focus();
+        },
+        useSystem: function () {
+          if (this.systemMatch) this.pick({ value: this.systemMatch });
+        },
+      };
+    };
+  </script>
+
+  {% comment %}
+    The member-dates dialog (tasks/partials/task_dates_modal.html). Each date
+    is a day and a time. For one member, a date they have no own value for
+    starts on the task's — the same moment, shown in the timezone the
+    dialog opens on — so the Lead sees what the member follows and changes
+    only what should differ; the server treats a date sent back at the
+    task's moment as "follow the task" (forms.AssigneeDatesForm). Picking
+    another timezone afterwards leaves the dates and times as they are:
+    they are saved as that clock time in the new zone. A date the task does not have
+    either starts empty, day and time; picking a day fills in the task
+    form's default time (9:00 AM to start, 5:00 PM to be due), and clearing
+    it clears the time. For everyone not done, the dates start on the
+    task's the same way; there a date left at the task's (or emptied) keeps
+    each member's own, and only a date the Lead changes is given to all.
+
+    ``cfg``: taskZone (IANA name), taskStart / taskDue (epoch milliseconds,
+    or null).
+  {% endcomment %}
+  <script>
+    // A day and time pair (tasks/partials/date_time_field.html): picking a
+    // day fills in the time picker's data-default-time when it is empty;
+    // clearing the day clears the time.
+    window.dateTimeDefaults = function (event) {
+      var day = event.target;
+      if (!day || day.type !== "date") return;
+      var time = day.parentElement && day.parentElement.querySelector("input[type=time]");
+      if (!time) return;
+      var before = time.value;
+      if (!day.value) time.value = "";
+      else if (!time.value) time.value = time.dataset.defaultTime || "";
+      if (time.value !== before) time.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    window.memberDatesDialog = function (cfg) {
+      var wall = function (ms, zone) {
+        try {
+          var parts = {};
+          new Intl.DateTimeFormat("en-CA", {
+            timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit",
+            hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+          }).formatToParts(new Date(ms)).forEach(function (p) { parts[p.type] = p.value; });
+          return [parts.year + "-" + parts.month + "-" + parts.day, parts.hour + ":" + parts.minute];
+        } catch (e) {
+          return ["", ""];
+        }
+      };
+      var split = function (value, fallback) {
+        return value ? [value.slice(0, 10), value.slice(11, 16) || fallback] : ["", fallback];
+      };
+      return {
+        scope: "member", member: "", name: "", reason: "", hasPersonal: false, error: "",
+        startDay: "", startTime: "", dueDay: "", dueTime: "",
+        startFollows: false, dueFollows: false,
+        open: function (detail) {
+          this.scope = detail.scope || "member";
+          this.member = detail.member || "";
+          this.name = detail.name || "";
+          this.reason = detail.reason || "";
+          this.hasPersonal = !!detail.hasPersonal;
+          this.error = "";
+          var start = split(detail.start, ""), due = split(detail.value, "");
+          this.startDay = start[0]; this.startTime = start[1];
+          this.dueDay = due[0]; this.dueTime = due[1];
+          this.startFollows = !detail.start && cfg.taskStart != null;
+          this.dueFollows = !detail.value && cfg.taskDue != null;
+          // The timezone picker applies its zone on the same event, so the
+          // task's dates are read in it once it has; after that a change of
+          // zone keeps the clock times as they are.
+          var self = this;
+          this.$nextTick(function () { self.refill(); self.startFollows = self.dueFollows = false; });
+        },
+        zone: function () {
+          var select = this.$root.querySelector("select[name=timezone]");
+          return (select && select.value) || cfg.taskZone || "UTC";
+        },
+        // A day picked fills in the default time; a day cleared clears it.
+        dayChanged: function (which) {
+          if (which === "start") {
+            this.startFollows = false;
+            if (!this.startDay) this.startTime = "";
+            else if (!this.startTime) this.startTime = "09:00";
+          } else {
+            this.dueFollows = false;
+            if (!this.dueDay) this.dueTime = "";
+            else if (!this.dueTime) this.dueTime = "17:00";
+          }
+        },
+        refill: function () {
+          var zone = this.zone(), p;
+          if (this.startFollows) { p = wall(cfg.taskStart, zone); this.startDay = p[0]; this.startTime = p[1]; }
+          if (this.dueFollows) { p = wall(cfg.taskDue, zone); this.dueDay = p[0]; this.dueTime = p[1]; }
+        },
+      };
     };
   </script>
 
@@ -234,6 +592,289 @@
         },
         ariaSort: function (key) {
           return this.sortKey === key ? (this.sortDesc ? "descending" : "ascending") : null;
+        },
+      };
+    };
+  </script>
+
+  {% comment %}
+    The task side pane (#task-pane-body on the board and the project page) is
+    filled by swapping a task's markup over whatever it last held: the task
+    opened before, or the same task when an edit reloads it. HTMX treats an
+    element whose id is also in the old markup as the same element carried
+    over: it hands the new one the old one's class and style, and only puts
+    the new markup's back ~20ms later — wiping what Alpine set in between.
+    That re-showed the older comments hidden behind See more (x-show's
+    display:none, lost), and with them anything else script had styled.
+
+    Nothing should carry over from one load of the pane to the next, so the
+    pane is emptied the moment before its new content goes in. It is the same
+    tick as the swap, so nothing flashes; and only on a swap that happens, so
+    a failed request still gets the pane's error message.
+  {% endcomment %}
+  <script>
+    document.addEventListener("htmx:beforeSwap", function (event) {
+      var target = event.detail && event.detail.target;
+      if (target && target.id === "task-pane-body" && event.detail.shouldSwap) {
+        target.replaceChildren();
+      }
+    });
+  </script>
+
+  {% comment %}
+    Comment box @ list (comments/mention_list.html). The form carries
+    x-data="mentionBox()" and holds a JSON script of {candidates, selected}.
+    Typing @ at the start of a word opens the project's contributors whose
+    name has a word starting with each word typed after it, or whose email
+    starts with what was typed (ignoring case and accents); each is listed
+    with their email. Picking one replaces the @query with "@Name ".
+
+    Who is tagged is read from the text on every keystroke, and each tag is
+    highlighted in the box as it stands: a contributor picked from the list
+    whose @Name is still there; one whose @Name is typed out in full, when no
+    other contributor shares it (two Alex Smiths need a pick to say which);
+    and one whose @email is typed out. Break a tag — delete a letter of it —
+    and its highlight goes, and so does the tag: the hidden inputs the form
+    posts are exactly the highlighted people, so what is highlighted is what
+    the server tags. A screen reader hears who is tagged through a polite
+    live region, since the highlight itself is only paint.
+
+    Textareas cannot style their own text, so the highlight is a layer
+    behind the box (.mention-backdrop): a div copying the textarea's font,
+    padding, border and size, holding the same text with each tag in a
+    <mark>, its text transparent; the textarea's own background goes
+    transparent so the marks show through. It follows the box's scrolling
+    and resizing. Nothing it relies on is written onto the textarea: see
+    .mention-field in the styles for why.
+
+    The textarea is the combobox: it keeps focus throughout, and arrows,
+    Enter/Tab and Escape drive the list only while it is open.
+  {% endcomment %}
+  <script>
+    window.mentionBox = function () {
+      var fold = function (text) {
+        return String(text || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+      };
+      var escapeRe = function (t) { return String(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); };
+      var escapeHtml = function (t) {
+        return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      };
+      // The same rules as apps.comments.services, so the box highlights
+      // exactly what the server will tag. @Name: as written, a whole word.
+      var NAME_END = "(?![\\p{L}\\p{N}_])";
+      // @email: any case, and not the start of a longer address.
+      var EMAIL_END = "(?![\\p{L}\\p{N}_-]|\\.[\\p{L}\\p{N}_-])";
+      var namePattern = function (name) {
+        return new RegExp("@" + escapeRe(name) + NAME_END, "u");
+      };
+      // An address in either case, spelled as a pattern rather than with a
+      // case-insensitive flag, so it can sit beside case-sensitive names in
+      // one regex (inline (?i:) groups are too new to rely on).
+      var caseless = function (text) {
+        return Array.from(String(text)).map(function (ch) {
+          var lo = ch.toLowerCase(), up = ch.toUpperCase();
+          return lo === up ? escapeRe(ch) : "[" + escapeRe(lo) + escapeRe(up) + "]";
+        }).join("");
+      };
+      // Typed out with no pick, an address must start a word, as the
+      // server's EMAIL_TAG requires.
+      var typedEmailPattern = function (email) {
+        return new RegExp("(?:^|\\s)@" + caseless(email) + EMAIL_END, "u");
+      };
+      // Every tag of these people, longest first, for painting the marks.
+      var tagPattern = function (people) {
+        var parts = [];
+        people.forEach(function (c) {
+          parts.push({ len: c.name.length, src: escapeRe(c.name) + NAME_END });
+          parts.push({ len: c.email.length, src: caseless(c.email) + EMAIL_END });
+        });
+        if (!parts.length) return null;
+        parts.sort(function (a, b) { return b.len - a.len; });
+        return new RegExp("@(?:" + parts.map(function (p) { return p.src; }).join("|") + ")", "gu");
+      };
+      return {
+        uid: "mention-" + Math.random().toString(36).slice(2, 9),
+        candidates: [],
+        mentions: [],
+        tagged: [],
+        results: [],
+        open: false,
+        active: 0,
+        start: -1,
+        box: null,
+        init: function () {
+          var data = this.$el.querySelector('script[type="application/json"]');
+          try {
+            var parsed = JSON.parse(data ? data.textContent : "{}") || {};
+            this.candidates = parsed.candidates || [];
+            this.mentions = (parsed.selected || []).slice();
+          } catch (e) { /* a plain box, then */ }
+          this.box = this.$el.querySelector("textarea");
+          if (!this.box || !this.candidates.length) return;
+          var self = this;
+          this.buildBackdrop();
+          this.applyAria();
+          // The textarea has an id, so an HTMX swap over older content with
+          // the same id resets its attributes once it settles (see
+          // .mention-field in the styles above). Put the ARIA back after it.
+          document.addEventListener("htmx:afterSettle", function () {
+            if (self.box.isConnected) self.applyAria();
+          }, { once: true });
+          this.box.addEventListener("focus", function () { self.applyAria(); });
+          this.box.addEventListener("input", function () { self.refresh(); self.search(); });
+          this.box.addEventListener("click", function () { self.search(); });
+          this.box.addEventListener("scroll", function () { self.syncScroll(); });
+          this.box.addEventListener("blur", function () { self.close(); });
+          this.box.addEventListener("keydown", function (e) { self.key(e); });
+          this.$watch("open", function (v) {
+            self.box.setAttribute("aria-expanded", v ? "true" : "false");
+            self.syncActive();
+          });
+          this.$watch("active", function () { self.syncActive(); });
+          this.refresh();
+        },
+        // Read who the text tags, then repaint the highlight to match.
+        refresh: function () {
+          var text = this.box.value, picked = this.mentions, counts = {};
+          this.candidates.forEach(function (c) { counts[c.name] = (counts[c.name] || 0) + 1; });
+          this.tagged = this.candidates.filter(function (c) {
+            var chosen = picked.some(function (m) { return m.id === c.id; });
+            if ((chosen || counts[c.name] === 1) && namePattern(c.name).test(text)) return true;
+            return typedEmailPattern(c.email).test(text);
+          });
+          this.paint();
+        },
+        clear: function () {
+          this.mentions = [];
+          if (this.box) this.refresh();
+        },
+        get taggedSummary() {
+          return this.tagged.length
+            ? "Tagging " + this.tagged.map(function (c) { return c.name; }).join(", ")
+            : "";
+        },
+        buildBackdrop: function () {
+          var self = this, box = this.box;
+          this.back = document.createElement("div");
+          this.back.className = "mention-backdrop";
+          this.back.setAttribute("aria-hidden", "true");
+          box.parentNode.insertBefore(this.back, box);
+          this.fit();
+          if (window.ResizeObserver) {
+            new ResizeObserver(function () { self.fit(); }).observe(box);
+          }
+        },
+        // Lay the backdrop exactly under the textarea's text.
+        fit: function () {
+          var box = this.box, back = this.back, cs = getComputedStyle(box);
+          ["fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing",
+           "lineHeight", "textTransform", "wordSpacing", "textIndent", "tabSize",
+           "paddingTop", "paddingBottom", "paddingLeft",
+           "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
+           "borderTopLeftRadius", "borderTopRightRadius",
+           "borderBottomLeftRadius", "borderBottomRightRadius"].forEach(function (p) {
+            back.style[p] = cs[p];
+          });
+          back.style.boxSizing = "border-box";
+          back.style.borderStyle = "solid";
+          back.style.borderColor = "transparent";
+          // A scrollbar in the box narrows its text; narrow the copy to match.
+          var scrollbar = box.offsetWidth - box.clientWidth -
+            parseFloat(cs.borderLeftWidth) - parseFloat(cs.borderRightWidth);
+          back.style.paddingRight = (parseFloat(cs.paddingRight) + Math.max(0, scrollbar)) + "px";
+          back.style.top = box.offsetTop + "px";
+          back.style.left = box.offsetLeft + "px";
+          back.style.width = box.offsetWidth + "px";
+          back.style.height = box.offsetHeight + "px";
+          this.syncScroll();
+        },
+        syncScroll: function () {
+          if (!this.back) return;
+          this.back.scrollTop = this.box.scrollTop;
+          this.back.scrollLeft = this.box.scrollLeft;
+        },
+        paint: function () {
+          if (!this.back) return;
+          var text = this.box.value, html = "", last = 0;
+          var pattern = tagPattern(this.tagged), m;
+          if (pattern) {
+            while ((m = pattern.exec(text))) {
+              html += escapeHtml(text.slice(last, m.index)) + "<mark>" + escapeHtml(m[0]) + "</mark>";
+              last = m.index + m[0].length;
+            }
+          }
+          html += escapeHtml(text.slice(last));
+          // A trailing newline only takes up a line once something follows it.
+          this.back.innerHTML = html + (text.slice(-1) === "\n" ? " " : "");
+          this.fit();
+        },
+        applyAria: function () {
+          this.box.setAttribute("role", "combobox");
+          this.box.setAttribute("aria-autocomplete", "list");
+          this.box.setAttribute("aria-controls", this.uid + "-list");
+          this.box.setAttribute("aria-expanded", this.open ? "true" : "false");
+        },
+        syncActive: function () {
+          if (this.open && this.results.length) {
+            this.box.setAttribute("aria-activedescendant", this.uid + "-opt-" + this.active);
+            var el = document.getElementById(this.uid + "-opt-" + this.active);
+            if (el) el.scrollIntoView({ block: "nearest" });
+          } else {
+            this.box.removeAttribute("aria-activedescendant");
+          }
+        },
+        search: function () {
+          var caret = this.box.selectionStart;
+          // The last @ that starts a word before the caret, on this line. The
+          // query may hold an @ of its own (an address being typed), but not
+          // one that starts another word.
+          var m = /(?:^|\s)@((?:(?!\s@)[^\n]){0,60})$/.exec(this.box.value.slice(0, caret));
+          if (!m) return this.close();
+          var query = fold(m[1]);
+          var words = query.split(/\s+/).filter(Boolean);
+          this.results = this.candidates.filter(function (c) {
+            if (query && fold(c.email).indexOf(query.trim()) === 0) return true;
+            var parts = fold(c.name).split(/\s+/);
+            return words.every(function (w) {
+              return parts.some(function (p) { return p.indexOf(w) === 0; });
+            });
+          }).slice(0, 8);
+          this.start = caret - m[1].length - 1;
+          this.active = 0;
+          this.open = this.results.length > 0;
+        },
+        close: function () { this.open = false; this.start = -1; },
+        key: function (e) {
+          if (!this.open) return;
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            this.active = (this.active + 1) % this.results.length;
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            this.active = (this.active - 1 + this.results.length) % this.results.length;
+          } else if (e.key === "Enter" || e.key === "Tab") {
+            e.preventDefault();
+            this.pick(this.results[this.active]);
+          } else if (e.key === "Escape") {
+            // Close the list, not the dialog or pane the box sits in.
+            e.preventDefault();
+            e.stopPropagation();
+            this.close();
+          }
+        },
+        pick: function (c) {
+          if (!c || this.start < 0) return;
+          var text = this.box.value, caret = this.box.selectionStart;
+          var insert = "@" + c.name + " ";
+          this.box.value = text.slice(0, this.start) + insert + text.slice(caret);
+          var pos = this.start + insert.length;
+          this.box.setSelectionRange(pos, pos);
+          this.box.focus();
+          if (!this.mentions.some(function (m) { return m.id === c.id; })) {
+            this.mentions.push({ id: c.id, name: c.name });
+          }
+          this.refresh();
+          this.close();
         },
       };
     };
@@ -629,6 +1270,82 @@
       </footer>
     {% endif %}
   </div><!-- end main content -->
+
+  {% comment %}
+    Leaving the site. A link marked data-external-link (the web addresses in
+    comments, see comment_tags.comment_body) asks before it takes anyone off
+    i-CONNECTS: what someone typed into a comment can point anywhere. A link
+    back into i-CONNECTS itself — same host — is not leaving, and opens as
+    it would anyway.
+
+    Return is the primary button and has the focus, so Enter or Escape
+    keeps the reader here; Continue opens the address in a new tab. The
+    address is shown in full, so they can see where it really goes before
+    they choose. One dialog serves the whole page, comments swapped in by
+    HTMX included, since the click is caught on the document.
+  {% endcomment %}
+  <dialog id="external-link-modal" class="modal"
+          aria-labelledby="external-link-title" aria-describedby="external-link-body">
+    <div class="modal-box max-w-lg bg-base-100 border border-brand-light/60 p-0">
+      <div class="flex items-start justify-between gap-4 px-6 pt-5 pb-4 border-b border-brand-light/60">
+        <h2 id="external-link-title" class="text-xl font-semibold text-brand-navy">Leaving i-CONNECTS</h2>
+        <form method="dialog">
+          <button class="btn btn-sm btn-circle btn-ghost -mr-2 -mt-1" aria-label="Close">&times;</button>
+        </form>
+      </div>
+      <div id="external-link-body" class="px-6 py-5 text-brand-text">
+        <p>You are now leaving i-CONNECTS. We are not responsible for the content of external websites.</p>
+        <p class="mt-3 text-sm text-brand-text/70">This link goes to:</p>
+        <p id="external-link-url"
+           class="mt-1 rounded-lg bg-brand-lighter px-3 py-2 text-sm text-brand-navy break-all"></p>
+      </div>
+      <div class="flex gap-2 justify-end px-6 py-4 border-t border-brand-light/60">
+        <button type="button" id="external-link-continue"
+                class="btn bg-base-100 border-brand-light text-brand-text hover:bg-brand-lighter hover:border-brand-light">Continue</button>
+        <button type="button" id="external-link-return" class="btn btn-primary" autofocus>Return</button>
+      </div>
+    </div>
+    <form method="dialog" class="modal-backdrop"><button>close</button></form>
+  </dialog>
+  <script>
+    (function () {
+      var modal = document.getElementById("external-link-modal");
+      var shown = document.getElementById("external-link-url");
+      var target = null;
+
+      function leaving(link) {
+        try { return new URL(link.href, location.href).host !== location.host; }
+        catch (e) { return true; }
+      }
+      function ask(event) {
+        var link = event.target.closest && event.target.closest("a[data-external-link]");
+        if (!link || !leaving(link)) return;
+        // A middle click opens a tab too; catch it as well as a plain click.
+        if (event.type === "auxclick" && event.button !== 1) return;
+        event.preventDefault();
+        target = link.href;
+        shown.textContent = target;
+        modal.showModal();
+        document.getElementById("external-link-return").focus();
+      }
+      document.addEventListener("click", ask);
+      document.addEventListener("auxclick", ask);
+
+      document.getElementById("external-link-continue").addEventListener("click", function () {
+        if (target) window.open(target, "_blank", "noopener,noreferrer");
+        modal.close();
+      });
+      document.getElementById("external-link-return").addEventListener("click", function () {
+        modal.close();
+      });
+      modal.addEventListener("close", function () { target = null; });
+      // Escape closes this dialog, and only this dialog: the task pane
+      // behind it listens for Escape on the window to close itself.
+      modal.addEventListener("keydown", function (event) {
+        if (event.key === "Escape") event.stopPropagation();
+      });
+    })();
+  </script>
 
   {% block extra_body %}{% endblock %}
 </body>

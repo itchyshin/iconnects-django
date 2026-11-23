@@ -38,14 +38,15 @@ so emitting it too would duplicate visible, unstyled-by-htmx content.
             {% if task.is_priority %}
               {% include "_components/priority_flag.html" %}
             {% endif %}
-            {% if task.deadline %}
+            {# my_deadline: the viewer's individual deadline where a Lead set one, else the task's. #}
+            {% if task.my_deadline %}
               <span class="inline-flex items-center gap-1 text-xs
-                {% if task.deadline < now and task.status != 'COMPLETED' %}text-error font-medium{% else %}text-brand-text/60{% endif %}">
+                {% if task.my_deadline < now and task.status != 'COMPLETED' %}text-error font-medium{% else %}text-brand-text/60{% endif %}">
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
                      stroke-width="1.8" stroke="currentColor" class="w-3.5 h-3.5 shrink-0" aria-hidden="true">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6l4 2m5-2a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
                 </svg>
-                {{ task.deadline|date:"M j, Y" }}
+                {{ task.my_deadline|in_zone:task.my_deadline_tz|date:"M j, Y" }}{% if task.my_deadline != task.deadline %} <span class="text-brand-text/60 font-normal" title="An individual deadline a Lead set for you{% if task.deadline %}; the task is due {{ task.deadline|in_zone:task.timezone|date:"M j, Y" }}{% endif %}">(your deadline)</span>{% endif %}
               </span>
             {% endif %}
             {% with assignees=task.assigned_members.all|member_name_summary %}

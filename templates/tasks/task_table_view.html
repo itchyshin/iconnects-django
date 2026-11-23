@@ -1,3 +1,4 @@
+{% load task_tags %}
 {# Table view partial — included in board.html inside x-show="$store.board.viewMode === 'table'", #}
 {# and rendered alone by BoardTablePartialView when a header re-sorts it. #}
 {# Context comes from views._table_view_context. #}
@@ -32,7 +33,7 @@
             <td>{% include "_components/assignee_count.html" with count=task.n_assignees %}</td>
             <td>{% include "_components/reviewer_count.html" with count=task.n_reviewers %}</td>
             <td class="text-xs whitespace-nowrap text-brand-text/80">
-              {% if task.start_date %}{{ task.start_date|date:"M j, Y" }}{% else %}<span class="text-brand-text/40">&mdash;</span>{% endif %}
+              {% if task.start_date %}{{ task.start_date|in_zone:task.timezone|date:"M j, Y" }}{% else %}<span class="text-brand-text/40">&mdash;</span>{% endif %}
             </td>
             <td class="text-xs whitespace-nowrap">
               {% if task.deadline %}
@@ -40,7 +41,7 @@
                 {# keeps a plain title here, since the table's horizontal scroll box would #}
                 {# clip the styled bubble. #}
                 <span class="inline-flex items-center gap-2">
-                  <span class="text-brand-text/80">{{ task.deadline|date:"M j, Y" }}</span>
+                  <span class="text-brand-text/80">{{ task.deadline|in_zone:task.timezone|date:"M j, Y" }}</span>
                   {% include "_components/overdue_badge.html" with task=task icon_only=True %}
                 </span>
               {% else %}

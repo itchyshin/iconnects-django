@@ -37,18 +37,29 @@
       </ul>
     </details>
   </div>
-  <div class="flex flex-wrap gap-2 mt-3">
+  {# Each pill is preceded by what it describes, so "Member" reads as the #}
+  {# viewer's own standing and "Public" as the project's visibility.     #}
+  <div class="flex flex-wrap items-center gap-x-4 gap-y-2 mt-3">
     {% if user_privilege %}
-      <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
-        {% if user_privilege == 'PROJECT_MANAGER' %}bg-brand-coral/10 text-brand-coral{% else %}bg-brand-light/60 text-brand-text{% endif %}">
-        {{ user_privilege|privilege_label }}
-      </span>
+      <div class="inline-flex items-center gap-1.5">
+        <span class="text-xs text-brand-text/60">Your privilege:</span>
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium
+          {% if user_privilege == 'PROJECT_MANAGER' %}bg-brand-coral/10 text-brand-coral{% else %}bg-brand-light/60 text-brand-text{% endif %}">
+          {{ user_privilege|privilege_label }}
+        </span>
+      </div>
     {% endif %}
-    {% include "_components/status_badge.html" with status=project.get_status_display %}
-    {% if project.is_public %}
-      <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border border-gray-300 text-gray-500">Public</span>
-    {% else %}
-      <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border border-gray-300 text-gray-500">Private</span>
-    {% endif %}
+    <div class="inline-flex items-center gap-1.5">
+      <span class="text-xs text-brand-text/60">Project stage:</span>
+      {% include "_components/status_badge.html" with status=project.get_status_display %}
+    </div>
+    <div class="inline-flex items-center gap-1.5">
+      <span class="text-xs text-brand-text/60">Project visibility:</span>
+      {% if project.is_public %}
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border border-gray-300 text-gray-500">Public</span>
+      {% else %}
+        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border border-gray-300 text-gray-500">Private</span>
+      {% endif %}
+    </div>
   </div>
 </div>

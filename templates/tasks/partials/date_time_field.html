@@ -1,0 +1,24 @@
+{% comment %}
+  One of the task form's dates as a day picker and a time picker side by
+  side (``timezones.DateTimeSplitWidget``). While the day is empty the time
+  is empty too; picking a day fills in the field's default time if none is
+  set — 9:00 AM for the start date, 5:00 PM for the due date — and
+  clearing the day clears the time. An empty day means no date.
+
+    {% include "tasks/partials/date_time_field.html" with field=form.start_date %}
+{% endcomment %}
+<div class="form-control w-full mb-3" data-date-time-field="{{ field.html_name }}">
+  <label for="{{ field.auto_id }}_0" class="label py-0.5 pb-1">
+    <span class="label-text text-sm text-brand-navy font-medium">{{ field.label }}</span>
+  </label>
+  <div class="grid grid-cols-[minmax(0,1fr)_8.5rem] gap-2"
+       x-data @input="dateTimeDefaults($event)" @change="dateTimeDefaults($event)">
+    {{ field }}
+  </div>
+  {% if field.help_text %}
+    <label class="label pt-1"><span class="label-text-alt text-brand-text/60">{{ field.help_text }}</span></label>
+  {% endif %}
+  {% if field.errors %}
+    <label class="label pt-1"><span class="label-text-alt text-error">{{ field.errors|join:" " }}</span></label>
+  {% endif %}
+</div>

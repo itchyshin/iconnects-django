@@ -3,7 +3,7 @@
 <p>
   <strong>{{ invitation.added_by }}</strong> invited you to join the project
   <strong>{{ project.name }}</strong> on i-connects as
-  <em>{{ invitation.privilege }}</em>.
+  a <em>{{ invitation.get_privilege_display }}</em>.
 </p>
 <p>
   <a href="{{ url }}">Accept or decline the invitation</a>

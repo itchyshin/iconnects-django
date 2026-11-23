@@ -1,0 +1,1 @@
+{% autoescape off %}i-connects: {{ author_name }} mentioned you on "{{ task.name }}"{% endautoescape %}

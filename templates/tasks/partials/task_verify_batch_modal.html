@@ -1,0 +1,83 @@
+{% comment %}
+  Confirmation for one of the Lead's batch verifications, in the app's
+  standard modal: a daisyUI <dialog> with a navy title, the members it
+  would verify, Cancel and a coral primary action, and a click-outside
+  backdrop that closes it (the same shape as the Modify privilege modal).
+
+  Expects ``scope`` ("done" or "reviewed"), ``count`` (how many parts it
+  would verify), ``task`` and ``assignee_states``. Opened by its button in
+  task_status_block.html; Verify posts to tasks:verify_batch and swaps
+  #task-status-block, which this dialog sits inside, so the swap closes it.
+
+  The note under the members says what verifying means for CRediT: on a
+  project tracking it, verification is what records each member's
+  contribution under the task's CRediT role; elsewhere it records the
+  Lead's sign-off and credits nothing.
+{% endcomment %}
+<dialog id="verify-{{ scope }}-modal-{{ task.pk }}" class="modal"
+        aria-labelledby="verify-{{ scope }}-modal-title-{{ task.pk }}"
+        data-verify-modal="{{ scope }}">
+  <div class="modal-box">
+    <h3 id="verify-{{ scope }}-modal-title-{{ task.pk }}" class="text-lg font-semibold text-brand-navy">
+      {% if scope == "reviewed" %}Verify all marked reviewed{% else %}Verify all marked done{% endif %}
+    </h3>
+    <p class="mt-3 text-brand-text">
+      Verify the contribution{{ count|pluralize }} of
+      {% if scope == "reviewed" %}every part marked done and reviewed{% else %}every part marked done{% endif %}
+      that isn't verified yet?
+    </p>
+    <ul class="mt-3 flex flex-col gap-1 text-sm text-brand-navy" data-verify-modal-members>
+      {% for s in assignee_states %}
+        {% if s.done and not s.verified %}
+          {% if scope != "reviewed" or s.reviewed %}
+            <li class="flex items-center gap-2">
+              <span class="w-5 h-5 rounded-full bg-brand-navy/80 text-white text-[10px] font-semibold inline-flex items-center justify-center shrink-0" aria-hidden="true">{{ s.member.display_name|slice:":1"|upper }}</span>
+              <span>{{ s.member.display_name }}</span>
+              {% if s.tracks_credit and s.own_type %}<span class="text-xs text-brand-text/60" data-verify-own-type>(as {{ s.contribution_type_label }})</span>{% endif %}
+            </li>
+          {% endif %}
+        {% endif %}
+      {% endfor %}
+    </ul>
+    <div class="mt-4 rounded-md bg-brand-lighter px-3 py-2.5 text-xs text-brand-text/80" data-verify-credit-note>
+      {% if task.project.tracks_credit %}
+        <p>
+          <span class="font-semibold text-brand-navy">What verifying means for CRediT.</span>
+          Verifying is your sign-off, as a Lead, that each member did their part.
+          It records their contribution under this task's CRediT role,
+          <span class="font-semibold text-brand-navy">{{ task.get_contribution_type_display }}</span>,
+          on the project's Contribution Tracking page and on their own Contributions page
+          — or under their own role, for a member a Lead gave one (shown beside their name).
+          Nothing is credited until a part is verified. Unticking Verified later, or the
+          member undoing their Done mark, removes the contribution again.
+          <a href="https://credit.niso.org/" target="_blank" rel="noopener noreferrer"
+             class="text-brand-navy underline hover:text-brand-coral">What is CRediT?<span class="sr-only"> (opens in a new tab)</span></a>
+        </p>
+      {% else %}
+        <p>
+          <span class="font-semibold text-brand-navy">No CRediT on this project.</span>
+          It doesn't track contributions with CRediT, so verifying records your
+          sign-off only; no contribution is credited.
+        </p>
+      {% endif %}
+    </div>
+    <form method="post"
+          action="{% url 'tasks:verify_batch' pk=task.pk %}"
+          hx-post="{% url 'tasks:verify_batch' pk=task.pk %}"
+          hx-vals='{"pane_mode": "1"}'
+          hx-target="#task-status-block"
+          hx-swap="outerHTML"
+          class="flex gap-2 justify-end mt-6">
+      {% csrf_token %}
+      <input type="hidden" name="scope" value="{{ scope }}">
+      <button type="button" class="btn btn-ghost"
+              onclick="document.getElementById('verify-{{ scope }}-modal-{{ task.pk }}').close()">Cancel</button>
+      <button type="submit" class="btn bg-brand-coral hover:bg-brand-coral/90 text-white border-0">
+        Verify {{ count }}
+      </button>
+    </form>
+  </div>
+  <form method="dialog" class="modal-backdrop">
+    <button>close</button>
+  </form>
+</dialog>

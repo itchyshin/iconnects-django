@@ -16,7 +16,7 @@
   {# Stats bar #}
   <div class="flex flex-row flex-wrap gap-4">
     <a href="{% url 'projects:my_list' %}"
-       class="group relative brand-card p-4 flex flex-col gap-1 cursor-pointer transition-shadow hover:ring-1 hover:ring-brand-navy/20 overflow-hidden"
+       class="brand-card p-4 flex flex-col gap-1 cursor-pointer transition-shadow hover:ring-1 hover:ring-brand-navy/20 overflow-hidden"
        style="flex: 1 1 160px">
       <div class="flex items-center gap-2">
         <span class="stat-icon flex items-center justify-center text-brand-text/50 shrink-0">
@@ -29,17 +29,9 @@
         <span class="stat-label text-xs font-medium uppercase tracking-wide text-brand-text/50">Projects</span>
       </div>
       <span class="stat-number text-4xl font-bold text-brand-navy self-end">{{ project_count }}</span>
-      <span class="absolute bottom-3 left-3 flex items-center gap-1 pl-3 pr-2.5 py-1.5 rounded-full bg-brand-navy text-white text-xs font-semibold whitespace-nowrap
-                   opacity-0 -translate-x-1 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150">
-        All projects
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
-             stroke-width="2.2" stroke="currentColor" class="w-3.5 h-3.5" aria-hidden="true">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M17.25 8.25 21 12m0 0-3.75 3.75M21 12H3" />
-        </svg>
-      </span>
     </a>
     <a href="{% url 'tasks:my_list' %}"
-       class="group relative brand-card p-4 flex flex-col gap-1 cursor-pointer transition-shadow hover:ring-1 hover:ring-brand-navy/20 overflow-hidden"
+       class="brand-card p-4 flex flex-col gap-1 cursor-pointer transition-shadow hover:ring-1 hover:ring-brand-navy/20 overflow-hidden"
        style="flex: 1 1 160px">
       <div class="flex items-center gap-2">
         <span class="stat-icon flex items-center justify-center text-brand-text/50 shrink-0">
@@ -52,17 +44,9 @@
         <span class="stat-label text-xs font-medium uppercase tracking-wide text-brand-text/50">Tasks</span>
       </div>
       <span class="stat-number text-4xl font-bold text-brand-navy self-end">{{ active_tasks_total }}</span>
-      <span class="absolute bottom-3 left-3 flex items-center gap-1 pl-3 pr-2.5 py-1.5 rounded-full bg-brand-navy text-white text-xs font-semibold whitespace-nowrap
-                   opacity-0 -translate-x-1 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150">
-        All tasks
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
-             stroke-width="2.2" stroke="currentColor" class="w-3.5 h-3.5" aria-hidden="true">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M17.25 8.25 21 12m0 0-3.75 3.75M21 12H3" />
-        </svg>
-      </span>
     </a>
     <a href="{% url 'projects:requests' %}"
-       class="group relative brand-card p-4 flex flex-col gap-1 cursor-pointer transition-shadow hover:ring-1 hover:ring-brand-navy/20 overflow-hidden"
+       class="brand-card p-4 flex flex-col gap-1 cursor-pointer transition-shadow hover:ring-1 hover:ring-brand-navy/20 overflow-hidden"
        style="flex: 1 1 160px">
       <div class="flex items-center gap-2">
         <span class="stat-icon flex items-center justify-center text-brand-text/50 shrink-0">
@@ -78,14 +62,6 @@
         <span class="stat-label text-xs font-medium uppercase tracking-wide text-brand-text/50">Requests</span>
       </div>
       <span class="stat-number text-4xl font-bold text-brand-navy self-end">{{ incoming_request_count }}</span>
-      <span class="absolute bottom-3 left-3 flex items-center gap-1 pl-3 pr-2.5 py-1.5 rounded-full bg-brand-navy text-white text-xs font-semibold whitespace-nowrap
-                   opacity-0 -translate-x-1 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-150">
-        All requests
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
-             stroke-width="2.2" stroke="currentColor" class="w-3.5 h-3.5" aria-hidden="true">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M17.25 8.25 21 12m0 0-3.75 3.75M21 12H3" />
-        </svg>
-      </span>
     </a>
   </div>
 
